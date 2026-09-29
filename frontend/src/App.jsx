@@ -559,21 +559,21 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
   const testimonials = [
     {
       quote: "I used Synapic for my first-year psychology lectures and turned messy notes into revision cards before the bus ride home.",
-      name: 'James Smith',
+      name: 'Anonymous Student',
       role: 'Psychology student, UOA',
-      initials: 'JS',
+      initials: 'AS',
     },
     {
       quote: 'The summaries helped me find the actual exam concepts in long biology readings without losing the details I needed.',
-      name: 'Elena Lopez',
-      role: 'Pre-med student',
-      initials: 'EL',
+      name: 'Anonymous Student',
+      role: 'Pre-med student, UOA',
+      initials: 'AS',
     },
     {
       quote: 'I save decks by topic now, so finals revision feels organised instead of starting from scratch every week.',
-      name: 'Ryan Chen',
-      role: 'Final Year, AUT',
-      initials: 'RC',
+      name: 'Anonymous Student',
+      role: 'Business student, AUT',
+      initials: 'AS',
     },
   ]
 
