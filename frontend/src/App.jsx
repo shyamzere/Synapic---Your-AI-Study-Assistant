@@ -51,6 +51,7 @@ const DARK_THEME = {
 let C = LIGHT_THEME
 
 const MAX_INPUT_CHARS = 100_000
+const GUEST_MAX_INPUT_CHARS = 12_000
 const FREE_GENERATION_LIMIT = 5
 const APP_TABS = [
   { id: 'flashcards', label: 'Flashcards' },
@@ -1239,11 +1240,16 @@ function UpgradePrompt({ onSignUp, onClose }) {
           You've used your {FREE_GENERATION_LIMIT} free generations
         </h2>
         <p className="text-sm mb-6 leading-relaxed" style={{ color: C.textMuted }}>
-          Create a free account to get unlimited flashcards, quizzes, and summaries, plus save your decks forever.
+          Create a free account to get much higher daily limits for flashcards, quizzes, and summaries, plus save your decks forever.
         </p>
         <div className="rounded-2xl p-4 mb-6 text-left space-y-2"
           style={{ background: C.accentLight, border: `1px solid ${C.accent}30` }}>
-          {['Unlimited AI generations', 'Save and revisit your decks', 'Free forever - no credit card'].map(item => (
+          {[
+            'Much higher daily generation limits',
+            'Paste notes up to 100,000 characters (guests: 12,000)',
+            'Save and revisit your decks',
+            'Free forever - no credit card'
+          ].map(item => (
             <p key={item} className="text-sm font-medium" style={{ color: C.accentDark }}>{item}</p>
           ))}
         </div>
@@ -1397,11 +1403,13 @@ export default function App() {
     })
   }, [getStudyStreakStorageKey])
 
+  const currentInputLimit = user ? MAX_INPUT_CHARS : GUEST_MAX_INPUT_CHARS
+
   const generate = async () => {
     if (!notes.trim()) return
 
-    if (notes.length > MAX_INPUT_CHARS) {
-      setToast(`Text too long (${notes.length.toLocaleString()} chars). Keep it under ${MAX_INPUT_CHARS.toLocaleString()} characters.`)
+    if (notes.length > currentInputLimit) {
+      setToast(`Text too long (${notes.length.toLocaleString()} chars). Keep it under ${currentInputLimit.toLocaleString()} characters.`)
       return
     }
 
@@ -1421,17 +1429,22 @@ export default function App() {
     setQuizSubmitted(false)
 
     try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const requestConfig = session?.access_token
+        ? { headers: { Authorization: `Bearer ${session.access_token}` } }
+        : undefined
+
       if (tab === 'flashcards') {
-        const res = await axios.post(`${import.meta.env.VITE_API_URL}/generate-flashcards`, { text: notes })
+        const res = await axios.post(`${import.meta.env.VITE_API_URL}/generate-flashcards`, { text: notes }, requestConfig)
         setFlashcards(res.data.flashcards)
         setDeckName(makeDefaultDeckTitle(notes))
         setToast(`Generated ${res.data.flashcards.length} flashcards`)
       } else if (tab === 'quizzes') {
-        const res = await axios.post(`${import.meta.env.VITE_API_URL}/generate-quiz`, { text: notes })
+        const res = await axios.post(`${import.meta.env.VITE_API_URL}/generate-quiz`, { text: notes }, requestConfig)
         setQuiz(res.data.quiz)
         setToast(`Generated ${res.data.quiz.length} questions`)
       } else if (tab === 'summary') {
-        const res = await axios.post(`${import.meta.env.VITE_API_URL}/generate-summary`, { text: notes })
+        const res = await axios.post(`${import.meta.env.VITE_API_URL}/generate-summary`, { text: notes }, requestConfig)
         setSummary(res.data)
         setToast('Summary generated')
       }
@@ -1442,9 +1455,11 @@ export default function App() {
       const status = err?.response?.status
       const detail = err?.response?.data?.detail
       if (status === 400 && detail?.error === 'text_too_long') {
-        setToast(`Text too long. Max ${detail.max_characters.toLocaleString()} characters.`)
+        setToast(detail.message)
       } else if (status === 429) {
-        setToast('Rate limit reached - wait ~60 seconds and try again.')
+        setToast(detail?.message || 'Rate limit reached - wait ~60 seconds and try again.')
+      } else if (status === 413) {
+        setToast('That text is too large to send.')
       } else {
         setToast('Something went wrong. Is the backend running?')
       }
@@ -1696,10 +1711,16 @@ export default function App() {
                   }}
                   onClick={() => openAuth('signup')}>
                   {guestGenerations >= FREE_GENERATION_LIMIT
-                    ? 'No generations left - Sign up free unlimited access!'
+                    ? 'No free generations left. Sign up free for higher daily limits!'
                     : `${FREE_GENERATION_LIMIT - guestGenerations} free generation${FREE_GENERATION_LIMIT - guestGenerations === 1 ? '' : 's'} remaining`
                   }
                 </motion.div>
+              )}
+
+              {!user && (
+                <p className="text-xs -mt-3 mb-5" style={{ color: C.textMuted }}>
+                  Free account: notes up to 100,000 characters and much higher daily limits.
+                </p>
               )}
 
               {/* Textarea */}
@@ -1717,16 +1738,28 @@ export default function App() {
                 onChange={e => setNotes(e.target.value)}
               />
 
+              {!user && notes.length > GUEST_MAX_INPUT_CHARS && (
+                <p className="mt-2 text-xs" style={{ color: C.danger }}>
+                  Sign up free to paste up to 100,000 characters.{' '}
+                  <button
+                    onClick={() => openAuth('signup')}
+                    className="font-bold hover:underline"
+                    style={{ color: C.accent }}>
+                    Sign up free
+                  </button>
+                </p>
+              )}
+
               {/* Footer row: char counter + generate button */}
               <div className="flex items-center justify-between mt-3">
                 <div className="flex items-center gap-2">
                   <p className="text-xs"
                     style={{
-                      color: notes.length > MAX_INPUT_CHARS ? C.danger : C.textLight,
-                      fontWeight: notes.length > MAX_INPUT_CHARS ? '600' : 'normal'
+                      color: notes.length > currentInputLimit ? C.danger : C.textLight,
+                      fontWeight: notes.length > currentInputLimit ? '600' : 'normal'
                     }}>
                     {notes.length > 0
-                      ? `${notes.length.toLocaleString()} / ${MAX_INPUT_CHARS.toLocaleString()} characters${notes.length > MAX_INPUT_CHARS ? ' - too long' : ''}`
+                      ? `${notes.length.toLocaleString()} / ${currentInputLimit.toLocaleString()} characters${notes.length > currentInputLimit ? ' - too long' : ''}`
                       : 'Supports plain text'}
                   </p>
                 </div>
@@ -1734,7 +1767,7 @@ export default function App() {
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.97 }}
                   onClick={generate}
-                  disabled={loading || !notes.trim() || notes.length > MAX_INPUT_CHARS}
+                  disabled={loading || !notes.trim() || notes.length > currentInputLimit}
                   className="flex items-center gap-2 px-6 py-3 rounded-full font-bold text-white text-sm disabled:opacity-40 disabled:cursor-not-allowed"
                   style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
                   {loading ? (

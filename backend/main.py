@@ -1,22 +1,42 @@
 import json
+import hashlib
+import logging
 import os
 import re      # NEW: paragraph / sentence splitting
+import threading
 import time    # NEW: rate-limit delay between Groq calls
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from groq import Groq
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from starlette.responses import JSONResponse
 
 ENV_PATH = Path(__file__).with_name(".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
-DEFAULT_ALLOWED_ORIGINS = "http://localhost:5173"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "https://synapicai.vercel.app,http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
+ENABLE_DOCS = os.getenv("ENABLE_DOCS", "").lower() in {"1", "true", "yes"}
+logger = logging.getLogger(__name__)
 
 # ── Sizing constants ─────────────────────────────────────────────────────────
 # Each chunk sent to Groq must stay under this size.
@@ -26,7 +46,17 @@ CHUNK_SIZE = 10_000
 
 # Hard ceiling on total raw user input BEFORE we even start chunking.
 # 120,000 chars ≈ 90 dense A4 pages — more than enough for a whole semester.
-MAX_INPUT_CHARS = 120_000
+MAX_INPUT_CHARS = 100_000
+GUEST_MAX_INPUT_CHARS = 12_000
+MAX_BODY_BYTES = 512 * 1024
+SUPABASE_AUTH_TIMEOUT_SECONDS = 2.0
+GROQ_TIMEOUT_SECONDS = 20.0
+GROQ_MAX_TOKENS = 6000
+AUTH_CACHE_SECONDS = 60
+GUEST_DAILY_GROQ_CALL_LIMIT = 30
+USER_DAILY_GROQ_CALL_LIMIT = 300
+GLOBAL_DAILY_GROQ_CALL_LIMIT = 3_000
+MAX_CONCURRENT_GENERATIONS = 3
 
 # How many results to keep after merging chunks from all sections.
 # Raise these later if students tell you they want more.
@@ -37,15 +67,154 @@ MAX_QUIZ_QUESTIONS = 100
 # If you start seeing 429 errors on the free tier, raise this to 1.0.
 CHUNK_DELAY = 0.5  # seconds
 
-app = FastAPI(title="Synapic API")
+class BodySizeLimitMiddleware:
+    """Buffer HTTP request bodies up to a fixed safe maximum before parsing."""
 
+    def __init__(self, app, max_body_bytes: int):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_body_bytes:
+                    await JSONResponse(
+                        {"detail": "Request body too large."}, status_code=413
+                    )(scope, receive, send)
+                    return
+            except ValueError:
+                await JSONResponse(
+                    {"detail": "Invalid Content-Length header."}, status_code=400
+                )(scope, receive, send)
+                return
+
+        body_parts = []
+        total_size = 0
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] != "http.request":
+                continue
+            chunk = message.get("body", b"")
+            total_size += len(chunk)
+            if total_size > self.max_body_bytes:
+                await JSONResponse(
+                    {"detail": "Request body too large."}, status_code=413
+                )(scope, receive, send)
+                return
+            body_parts.append(chunk)
+            more_body = message.get("more_body", False)
+
+        body = b"".join(body_parts)
+        sent = False
+
+        async def replay_receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
+
+def get_client_ip(request: Request) -> str:
+    """Use Render/Cloudflare's client-IP header and never trust XFF."""
+    return request.headers.get(
+        "cf-connecting-ip",
+        request.client.host if request.client else "unknown",
+    )
+
+
+def get_verified_user_id(request: Request) -> str | None:
+    cached_user_id = getattr(request.state, "verified_user_id", None)
+    if getattr(request.state, "auth_checked", False):
+        return cached_user_id
+
+    request.state.auth_checked = True
+    authorization = request.headers.get("authorization", "")
+    if not authorization.lower().startswith("bearer "):
+        request.state.verified_user_id = None
+        return None
+
+    token = authorization[7:].strip()
+    if not token or not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        request.state.verified_user_id = None
+        return None
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now = time.monotonic()
+    with _auth_cache_lock:
+        if len(_auth_cache) > 1_000:
+            expired = [key for key, value in _auth_cache.items() if value[0] <= now]
+            for key in expired:
+                del _auth_cache[key]
+        cached = _auth_cache.get(token_hash)
+        if cached and cached[0] > now:
+            request.state.verified_user_id = cached[1]
+            return cached[1]
+
+    try:
+        response = httpx.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=SUPABASE_AUTH_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        user_id = response.json().get("id")
+    except (httpx.HTTPError, ValueError, TypeError):
+        request.state.verified_user_id = None
+        return None
+
+    if not isinstance(user_id, str) or not user_id:
+        request.state.verified_user_id = None
+        return None
+
+    with _auth_cache_lock:
+        _auth_cache[token_hash] = (now + AUTH_CACHE_SECONDS, user_id)
+    request.state.verified_user_id = user_id
+    return user_id
+
+
+def rate_limit_key(request: Request) -> str:
+    user_id = get_verified_user_id(request)
+    return f"user:{user_id}" if user_id else f"ip:{get_client_ip(request)}"
+
+
+limiter = Limiter(key_func=rate_limit_key)
+app = FastAPI(
+    title="Synapic API",
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(BodySizeLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+_auth_cache: dict[str, tuple[float, str]] = {}
+_auth_cache_lock = threading.Lock()
+_budget_lock = threading.Lock()
+_budget_day = None
+_global_groq_calls = 0
+_client_groq_calls: dict[str, int] = {}
+_generation_semaphore = threading.Semaphore(MAX_CONCURRENT_GENERATIONS)
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -88,17 +257,24 @@ class SummaryResponse(BaseModel):
 
 # ── Core Groq helpers ────────────────────────────────────────────────────────
 
-def check_text_length(text: str) -> dict | None:
+def check_text_length(
+    text: str,
+    max_characters: int,
+    is_guest: bool,
+) -> dict | None:
     """Return an error dict if text is over the absolute limit, else None."""
-    if len(text) > MAX_INPUT_CHARS:
+    if len(text) > max_characters:
+        message = (
+            f"Guest requests are limited to {GUEST_MAX_INPUT_CHARS:,} characters. "
+            "Sign up free to paste up to 100,000 characters."
+            if is_guest
+            else f"Please keep it under {MAX_INPUT_CHARS:,} characters."
+        )
         return {
             "error": "text_too_long",
-            "message": (
-                f"Your text is {len(text):,} characters. "
-                f"Please keep it under {MAX_INPUT_CHARS:,} characters."
-            ),
+            "message": message,
             "character_count": len(text),
-            "max_characters": MAX_INPUT_CHARS,
+            "max_characters": max_characters,
         }
     return None
 
@@ -107,9 +283,9 @@ def get_client() -> Groq:
     if not GROQ_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="Missing GROQ_API_KEY environment variable",
+            detail="The AI service failed. Please try again.",
         )
-    return Groq(api_key=GROQ_API_KEY)
+    return Groq(api_key=GROQ_API_KEY, timeout=GROQ_TIMEOUT_SECONDS)
 
 
 def create_chat_completion(prompt: str) -> Any:
@@ -118,6 +294,7 @@ def create_chat_completion(prompt: str) -> Any:
         return client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=GROQ_MAX_TOKENS,
         )
     except HTTPException:
         raise
@@ -134,9 +311,13 @@ def create_chat_completion(prompt: str) -> Any:
                     ),
                 },
             ) from exc
+        logger.exception("Groq chat completion failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": "ai_error", "message": error_str},
+            detail={
+                "error": "ai_error",
+                "message": "The AI service failed. Please try again.",
+            },
         ) from exc
 
 
@@ -152,20 +333,92 @@ def strip_code_fences(text: str) -> str:
     return cleaned.strip()
 
 
-def extract_notes(payload: NotesInput | str) -> str:
-    if isinstance(payload, str):
-        notes = payload.strip()
-    else:
-        notes = payload.text.strip()
+def extract_notes(
+    payload: NotesInput,
+    max_characters: int,
+    is_guest: bool,
+) -> str:
+    notes = payload.text.strip()
 
     if not notes:
         raise HTTPException(status_code=400, detail="Notes cannot be empty.")
 
-    length_error = check_text_length(notes)
+    length_error = check_text_length(notes, max_characters, is_guest)
     if length_error:
         raise HTTPException(status_code=400, detail=length_error)
 
     return notes
+
+
+def reserve_groq_budget(
+    request: Request,
+    user_id: str | None,
+    groq_call_count: int,
+) -> None:
+    global _budget_day, _global_groq_calls, _client_groq_calls
+
+    today = datetime.now(timezone.utc).date()
+    client_key = f"user:{user_id}" if user_id else f"ip:{get_client_ip(request)}"
+    client_limit = USER_DAILY_GROQ_CALL_LIMIT if user_id else GUEST_DAILY_GROQ_CALL_LIMIT
+
+    with _budget_lock:
+        if _budget_day != today:
+            _budget_day = today
+            _global_groq_calls = 0
+            _client_groq_calls = {}
+
+        if _global_groq_calls + groq_call_count > GLOBAL_DAILY_GROQ_CALL_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "global_groq_budget_exceeded",
+                    "message": "The daily AI capacity is exhausted. Please try again tomorrow.",
+                },
+            )
+
+        used_calls = _client_groq_calls.get(client_key, 0)
+        if used_calls + groq_call_count > client_limit:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "groq_budget_exceeded",
+                    "message": "Your daily AI generation limit is exhausted. Please try again tomorrow.",
+                },
+            )
+
+        _client_groq_calls[client_key] = used_calls + groq_call_count
+        _global_groq_calls += groq_call_count
+
+
+@contextmanager
+def generation_slot():
+    if not _generation_semaphore.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "service_busy",
+                "message": "The AI service is busy. Please try again in a moment.",
+            },
+        )
+    try:
+        yield
+    finally:
+        _generation_semaphore.release()
+
+
+def prepare_generation(
+    request: Request,
+    payload: NotesInput,
+    is_summary: bool,
+) -> tuple[str, list[str]]:
+    user_id = get_verified_user_id(request)
+    is_guest = user_id is None
+    max_characters = GUEST_MAX_INPUT_CHARS if is_guest else MAX_INPUT_CHARS
+    notes = extract_notes(payload, max_characters, is_guest)
+    chunks = chunk_text(notes)
+    groq_call_count = len(chunks) + (1 if is_summary and len(chunks) > 1 else 0)
+    reserve_groq_budget(request, user_id, groq_call_count)
+    return notes, chunks
 
 
 # ── Chunking helpers ─────────────────────────────────────────────────────────
@@ -301,8 +554,11 @@ def _summarise_text(text: str) -> SummaryResponse:
             detail="The AI did not return valid JSON summary data.",
         ) from exc
     except Exception as exc:
-        print(f"ERROR in _summarise_text: {exc}")
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.exception("Summary generation failed")
+        raise HTTPException(
+            status_code=502,
+            detail="The AI service failed. Please try again.",
+        ) from exc
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -313,12 +569,14 @@ async def root():
 
 
 @app.post("/generate-flashcards", response_model=FlashcardsResponse)
-async def generate_flashcards(payload: NotesInput | str):
-    notes = extract_notes(payload)
+@limiter.limit("10/minute;100/day")
+def generate_flashcards(request: Request, payload: NotesInput):
+    with generation_slot():
+        notes, chunks = prepare_generation(request, payload, is_summary=False)
+        return _generate_flashcards(notes, chunks)
 
-    # chunk_text returns [notes] unchanged when notes is short, so this loop
-    # handles both the simple 1-chunk case and the multi-chunk case identically.
-    chunks = chunk_text(notes)
+
+def _generate_flashcards(notes: str, chunks: list[str]) -> FlashcardsResponse:
 
     all_cards: list[Flashcard] = []
 
@@ -348,10 +606,18 @@ async def generate_flashcards(payload: NotesInput | str):
         except json.JSONDecodeError:
             # One bad chunk should not kill everything.
             # Log it and carry on — the other chunks may succeed.
-            print(f"WARNING: flashcard chunk {i + 1}/{len(chunks)} returned invalid JSON — skipping.")
+            logger.warning(
+                "Flashcard chunk %s/%s returned invalid JSON; skipping.",
+                i + 1,
+                len(chunks),
+            )
             continue
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            logger.exception("Flashcard generation failed")
+            raise HTTPException(
+                status_code=502,
+                detail="The AI service failed. Please try again.",
+            ) from exc
 
     if not all_cards:
         raise HTTPException(
@@ -364,9 +630,14 @@ async def generate_flashcards(payload: NotesInput | str):
 
 
 @app.post("/generate-quiz", response_model=QuizResponse)
-async def generate_quiz(payload: NotesInput | str):
-    notes = extract_notes(payload)
-    chunks = chunk_text(notes)
+@limiter.limit("10/minute;100/day")
+def generate_quiz(request: Request, payload: NotesInput):
+    with generation_slot():
+        notes, chunks = prepare_generation(request, payload, is_summary=False)
+        return _generate_quiz(notes, chunks)
+
+
+def _generate_quiz(notes: str, chunks: list[str]) -> QuizResponse:
 
     all_questions: list[QuizQuestion] = []
 
@@ -394,11 +665,18 @@ async def generate_quiz(payload: NotesInput | str):
         except HTTPException:
             raise
         except json.JSONDecodeError:
-            print(f"WARNING: quiz chunk {i + 1}/{len(chunks)} returned invalid JSON — skipping.")
+            logger.warning(
+                "Quiz chunk %s/%s returned invalid JSON; skipping.",
+                i + 1,
+                len(chunks),
+            )
             continue
         except Exception as exc:
-            print(f"ERROR: {exc}")
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            logger.exception("Quiz generation failed")
+            raise HTTPException(
+                status_code=502,
+                detail="The AI service failed. Please try again.",
+            ) from exc
 
     if not all_questions:
         raise HTTPException(
@@ -411,9 +689,14 @@ async def generate_quiz(payload: NotesInput | str):
 
 
 @app.post("/generate-summary", response_model=SummaryResponse)
-async def generate_summary(payload: NotesInput | str):
-    notes = extract_notes(payload)
-    chunks = chunk_text(notes)
+@limiter.limit("10/minute;100/day")
+def generate_summary(request: Request, payload: NotesInput):
+    with generation_slot():
+        notes, chunks = prepare_generation(request, payload, is_summary=True)
+        return _generate_summary(notes, chunks)
+
+
+def _generate_summary(notes: str, chunks: list[str]) -> SummaryResponse:
 
     # ── Short input: single Groq call, done ──────────────────────────────────
     if len(chunks) == 1:
@@ -457,7 +740,11 @@ async def generate_summary(payload: NotesInput | str):
             raise
         except Exception as exc:
             # A failed chunk is recoverable — we'll just have slightly less context.
-            print(f"WARNING: summary chunk {i + 1}/{len(chunks)} failed: {exc}")
+            logger.exception(
+                "Summary chunk %s/%s failed; skipping.",
+                i + 1,
+                len(chunks),
+            )
             continue
 
     if not chunk_summaries:
