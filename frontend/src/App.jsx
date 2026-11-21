@@ -57,6 +57,7 @@ const APP_TABS = [
   { id: 'flashcards', label: 'Flashcards' },
   { id: 'quizzes', label: 'Quizzes' },
   { id: 'summary', label: 'Summary' },
+  { id: 'chat', label: 'Chat' },
   { id: 'decks', label: 'My Decks' },
   { id: 'settings', label: 'Settings' },
 ]
@@ -1004,7 +1005,7 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '24px' }}>
           {testimonials.map((t, i) => (
-            <ScrollReveal key={t.name} delay={i * 0.08}>
+            <ScrollReveal key={`${t.name}-${t.role}`} delay={i * 0.08}>
               <motion.div
                 whileHover={{ y: -6, boxShadow: '0 20px 60px rgba(0,0,0,0.08)' }}
                 transition={{ duration: 0.3 }}
@@ -1269,6 +1270,244 @@ function UpgradePrompt({ onSignUp, onClose }) {
   )
 }
 
+// ── Chat with notes ──────────────────────────────────────────
+const CHAT_HISTORY_LIMIT = 6         // messages sent as context (backend max is 6)
+const CHAT_HISTORY_ITEM_MAX = 4000   // backend rejects longer history items
+const CHAT_QUESTION_MAX = 1000
+const CHAT_SUGGESTIONS = [
+  'Summarise the key ideas',
+  'What are the most important definitions?',
+  'Explain the hardest concept simply',
+]
+
+// Turns the backend error into a friendly toast message.
+// FastAPI sends `detail` as a string or as { error, message }.
+const chatErrorMessage = (err) => {
+  const status = err?.response?.status
+  const detail = err?.response?.data?.detail
+  const backendMessage = typeof detail === 'string' ? detail : detail?.message
+  if ((status === 400 || status === 429) && backendMessage) return backendMessage
+  if (status === 429) return 'Too many questions - wait a minute and try again.'
+  if (status === 413) return 'Your notes are too large to send.'
+  if (status === 422) return 'That message could not be sent. Try a shorter question.'
+  if (status === 502 || status === 503) return backendMessage || 'The AI service failed. Please try again.'
+  return 'Something went wrong. Is the backend running?'
+}
+
+// Renders an answer with [1]-style citations as small teal badges and
+// **bold** text as bold. Everything else is shown as plain text.
+function ChatAnswerText({ text }) {
+  const parts = text.split(/(\[\d+\]|\*\*[^*\n]+\*\*)/g)
+  return (
+    <>
+      {parts.map((part, i) => {
+        const citation = part.match(/^\[(\d+)\]$/)
+        if (citation) {
+          return (
+            <span key={i}
+              className="inline-flex items-center justify-center align-text-top mx-0.5 px-1.5 rounded-md text-[11px] font-bold"
+              style={{ background: C.accentLight, color: C.accentDark, minWidth: '18px', height: '18px' }}>
+              {citation[1]}
+            </span>
+          )
+        }
+        if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+          return <strong key={i}>{part.slice(2, -2)}</strong>
+        }
+        return <span key={i}>{part}</span>
+      })}
+    </>
+  )
+}
+
+function ChatSources({ sources }) {
+  const [open, setOpen] = useState(false)
+  if (!sources?.length) return null
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        className="text-xs font-semibold flex items-center gap-1 hover:opacity-80 transition-opacity"
+        style={{ color: C.accent }}>
+        <span style={{ display: 'inline-block', transition: 'transform 0.2s', transform: open ? 'rotate(90deg)' : 'none' }}>›</span>
+        Sources ({sources.length})
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            style={{ overflow: 'hidden' }}>
+            <div className="mt-2 space-y-2">
+              {sources.map(source => (
+                <div key={source.index} className="rounded-xl p-3 text-xs leading-relaxed"
+                  style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.textMuted }}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-bold" style={{ color: C.accentDark }}>[{source.index}]</span>
+                    <span style={{ color: C.textLight }}>relevance {source.score.toFixed(2)}</span>
+                  </div>
+                  <p style={{ whiteSpace: 'pre-wrap' }}>{source.text}</p>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
+  const [draft, setDraft] = useState('')
+  const listRef = useRef(null)
+
+  // Keep the newest message in view.
+  useEffect(() => {
+    const list = listRef.current
+    if (list) list.scrollTop = list.scrollHeight
+  }, [messages, loading])
+
+  const send = async (text) => {
+    const question = text.trim()
+    if (!question || loading || !hasNotes) return
+    setDraft('')
+    const ok = await onSend(question)
+    // If it failed, put the question back so the student doesn't have to retype it.
+    if (!ok) setDraft(current => current || question)
+  }
+
+  const handleKeyDown = (e) => {
+    // Enter sends, Shift+Enter adds a new line. isComposing avoids sending
+    // half-typed characters when using an IME (e.g. Chinese/Japanese input).
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      send(draft)
+    }
+  }
+
+  return (
+    <div className="rounded-3xl shadow-sm overflow-hidden"
+      style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4"
+        style={{ borderBottom: `1px solid ${C.border}` }}>
+        <div>
+          <p className="font-bold" style={{ color: C.text }}>Ask your notes</p>
+          <p className="text-xs mt-0.5" style={{ color: C.textMuted }}>
+            Answers come only from the notes above, with sources you can check.
+          </p>
+        </div>
+        {messages.length > 0 && (
+          <button type="button" onClick={onClear} disabled={loading}
+            className="px-3 py-1.5 rounded-full text-xs font-semibold border transition-all hover:opacity-80 disabled:opacity-40"
+            style={{ color: C.textMuted, borderColor: C.border, background: C.bg }}>
+            Clear chat
+          </button>
+        )}
+      </div>
+
+      {/* Message list */}
+      <div ref={listRef} className="px-6 py-5 space-y-4 overflow-y-auto"
+        style={{ minHeight: '260px', maxHeight: '520px' }}
+        aria-live="polite">
+        {messages.length === 0 && !loading && (
+          <div className="text-center py-10">
+            <p className="font-bold text-lg mb-2" style={{ color: C.text }}>
+              {hasNotes ? 'Ask anything about your notes' : 'Paste your notes first'}
+            </p>
+            <p className="text-sm mb-5" style={{ color: C.textMuted }}>
+              {hasNotes
+                ? 'Try one of these, or type your own question below.'
+                : 'Add your lecture notes in the box above, then ask questions about them here.'}
+            </p>
+            {hasNotes && (
+              <div className="flex flex-wrap justify-center gap-2">
+                {CHAT_SUGGESTIONS.map(suggestion => (
+                  <button key={suggestion} type="button" onClick={() => send(suggestion)}
+                    className="px-4 py-2 rounded-full text-sm font-medium transition-all hover:opacity-80"
+                    style={{ background: C.accentLight, color: C.accentDark, border: `1px solid ${C.accent}30` }}>
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {messages.map(message => (
+          <motion.div key={message.id}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2 }}
+            className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className="max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed"
+              style={message.role === 'user'
+                ? { background: C.accentGrad, color: 'white', borderBottomRightRadius: '6px' }
+                : { background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderBottomLeftRadius: '6px' }}>
+              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {message.role === 'assistant' ? <ChatAnswerText text={message.content} /> : message.content}
+              </div>
+              {message.role === 'assistant' && <ChatSources sources={message.sources} />}
+            </div>
+          </motion.div>
+        ))}
+
+        {loading && (
+          <div className="flex justify-start">
+            <div className="rounded-2xl px-4 py-3 flex items-center gap-2 text-sm"
+              style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.textMuted, borderBottomLeftRadius: '6px' }}>
+              <span className="flex gap-1" aria-hidden="true">
+                {[0, 1, 2].map(i => (
+                  <span key={i} className="w-1.5 h-1.5 rounded-full animate-bounce"
+                    style={{ background: C.accent, animationDelay: `${i * 0.15}s` }} />
+                ))}
+              </span>
+              Reading your notes...
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Input */}
+      <div className="px-6 py-4" style={{ borderTop: `1px solid ${C.border}` }}>
+        <div className="flex items-end gap-3">
+          <textarea
+            rows={2}
+            value={draft}
+            maxLength={CHAT_QUESTION_MAX}
+            disabled={!hasNotes}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onFocus={e => e.target.style.borderColor = C.accent}
+            onBlur={e => e.target.style.borderColor = C.border}
+            placeholder={hasNotes ? 'Ask a question about your notes...' : 'Paste your notes above to start chatting'}
+            aria-label="Ask a question about your notes"
+            className="flex-1 rounded-2xl px-4 py-3 text-sm resize-none focus:outline-none transition-all disabled:opacity-50"
+            style={{ background: C.bg, border: `1.5px solid ${C.border}`, color: C.text }}
+          />
+          <motion.button
+            type="button"
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={() => send(draft)}
+            disabled={loading || !hasNotes || !draft.trim()}
+            className="px-5 py-3 rounded-full font-bold text-white text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
+            {loading ? 'Thinking...' : 'Send'}
+          </motion.button>
+        </div>
+        <p className="text-xs mt-2" style={{ color: draft.length > CHAT_QUESTION_MAX - 100 ? C.warning : C.textLight }}>
+          Enter to send · Shift+Enter for a new line
+          {draft.length > CHAT_QUESTION_MAX - 100 && ` · ${draft.length}/${CHAT_QUESTION_MAX}`}
+        </p>
+      </div>
+    </div>
+  )
+}
+
 // ── Main App ─────────────────────────────────────────────────
 export default function App() {
   const shouldReduceMotion = useReducedMotion()
@@ -1297,6 +1536,11 @@ export default function App() {
   const [deckName, setDeckName] = useState('')
   const [studyStreak, setStudyStreak] = useState({ count: 0, lastStudiedDate: null })
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false)
+  // Chat lives here (not inside ChatPanel) so it survives switching tabs.
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatLoading, setChatLoading] = useState(false)
+  const chatSessionRef = useRef(0)   // bumps when the chat is reset
+  const chatMessageIdRef = useRef(0) // unique React keys for messages
 
   C = darkMode ? DARK_THEME : LIGHT_THEME
 
@@ -1467,7 +1711,69 @@ export default function App() {
     setLoading(false)
   }
 
+  // ── Chat with notes ───────────────────────────────────────
+  // Starting a new "session" makes any answer that is still on its way get
+  // ignored, so an old answer can't appear in a chat about different notes.
+  const resetChat = () => {
+    chatSessionRef.current += 1
+    setChatMessages(prev => (prev.length ? [] : prev))
+    setChatLoading(false)
+  }
 
+  const handleNotesChange = (value) => {
+    setNotes(value)
+    resetChat() // answers about the old notes would be misleading
+  }
+
+  // Returns true if the question was answered, false if it failed.
+  const sendChatMessage = async (question) => {
+    if (!notes.trim()) {
+      setToast('Paste your notes above first.')
+      return false
+    }
+    if (notes.length > currentInputLimit) {
+      setToast(`Text too long (${notes.length.toLocaleString()} chars). Keep it under ${currentInputLimit.toLocaleString()} characters.`)
+      return false
+    }
+
+    // The last few messages give the AI context for follow-up questions.
+    const history = chatMessages.slice(-CHAT_HISTORY_LIMIT).map(({ role, content }) => ({
+      role,
+      content: content.slice(0, CHAT_HISTORY_ITEM_MAX),
+    }))
+    const session = chatSessionRef.current
+    const userMessage = { id: ++chatMessageIdRef.current, role: 'user', content: question }
+    setChatMessages(prev => [...prev, userMessage])
+    setChatLoading(true)
+
+    try {
+      const { data: { session: authSession } } = await supabase.auth.getSession()
+      const requestConfig = authSession?.access_token
+        ? { headers: { Authorization: `Bearer ${authSession.access_token}` } }
+        : undefined
+      const res = await axios.post(
+        `${import.meta.env.VITE_API_URL}/chat/notes`,
+        { notes, question, history },
+        requestConfig,
+      )
+      if (session !== chatSessionRef.current) return true // chat was reset meanwhile
+      setChatMessages(prev => [...prev, {
+        id: ++chatMessageIdRef.current,
+        role: 'assistant',
+        content: res.data.answer,
+        sources: res.data.sources,
+      }])
+      return true
+    } catch (err) {
+      if (session !== chatSessionRef.current) return true
+      // Drop the unanswered question so history stays question/answer pairs.
+      setChatMessages(prev => prev.filter(m => m.id !== userMessage.id))
+      setToast(chatErrorMessage(err))
+      return false
+    } finally {
+      if (session === chatSessionRef.current) setChatLoading(false)
+    }
+  }
 
   // ── Save deck ─────────────────────────────────────────────
   const saveDeck = async () => {
@@ -1563,12 +1869,14 @@ export default function App() {
     flashcards: 'Create Study Materials',
     quizzes: 'Create Study Materials',
     summary: 'Create Study Materials',
+    chat: 'Chat With Your Notes',
   }
 
   const subheadings = {
     flashcards: 'Transform your dense lecture notes into interactive flashcards in seconds using our scholarly AI engine.',
     quizzes: 'Transform your dense lecture notes into a multiple-choice quiz to test your knowledge.',
     summary: 'Transform your dense lecture notes into a clean, structured summary in seconds.',
+    chat: 'Ask questions about your notes and get answers that point back to the exact passages they came from.',
   }
 
   const inputNotes = {
@@ -1698,8 +2006,8 @@ export default function App() {
                 </div>
               )}
 
-              {/* Guest usage banner - matches Image 2 pill badge */}
-              {!user && (
+              {/* Guest usage banner - matches Image 2 pill badge (chat isn't a generation) */}
+              {!user && tab !== 'chat' && (
                 <motion.div
                   animate={{ scale: [1, 1.01, 1] }}
                   transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
@@ -1735,7 +2043,7 @@ export default function App() {
                 onBlur={e => e.target.style.borderColor = C.border}
                 placeholder="Paste your lecture notes or textbook chapters here..."
                 value={notes}
-                onChange={e => setNotes(e.target.value)}
+                onChange={e => handleNotesChange(e.target.value)}
               />
 
               {!user && notes.length > GUEST_MAX_INPUT_CHARS && (
@@ -1763,6 +2071,11 @@ export default function App() {
                       : 'Supports plain text'}
                   </p>
                 </div>
+                {tab === 'chat' ? (
+                  <p className="text-xs font-semibold" style={{ color: C.accent }}>
+                    Ask your questions below
+                  </p>
+                ) : (
                 <motion.button
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.97 }}
@@ -1780,6 +2093,7 @@ export default function App() {
                     <>{btnLabels[tab]}</>
                   )}
                 </motion.button>
+                )}
               </div>
             </motion.div>
           )}
@@ -2344,6 +2658,21 @@ export default function App() {
                   </motion.button>
                 </motion.div>
               )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ── Chat tab ─────────────────────────────────── */}
+        <AnimatePresence mode="wait">
+          {tab === 'chat' && (
+            <motion.div key="chat" {...fadeUp}>
+              <ChatPanel
+                messages={chatMessages}
+                loading={chatLoading}
+                hasNotes={notes.trim().length > 0}
+                onSend={sendChatMessage}
+                onClear={resetChat}
+              />
             </motion.div>
           )}
         </AnimatePresence>
