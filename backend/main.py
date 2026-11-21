@@ -8,7 +8,7 @@ import time    # NEW: rate-limit delay between Groq calls
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Literal
 
 from dotenv import load_dotenv
 import httpx
@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
+
+from rag import build_messages, normalize_citations, retrieval_query, retrieve
 
 ENV_PATH = Path(__file__).with_name(".env")
 load_dotenv(dotenv_path=ENV_PATH)
@@ -57,6 +59,13 @@ GUEST_DAILY_GROQ_CALL_LIMIT = 30
 USER_DAILY_GROQ_CALL_LIMIT = 300
 GLOBAL_DAILY_GROQ_CALL_LIMIT = 3_000
 MAX_CONCURRENT_GENERATIONS = 3
+
+# Chat with notes: answers are short, so cap output lower than generation calls.
+CHAT_MAX_TOKENS = 1024
+CHAT_QUESTION_MAX_CHARS = 1_000
+CHAT_HISTORY_MAX_ITEMS = 6
+CHAT_HISTORY_ITEM_MAX_CHARS = 4_000  # ≈ the longest answer CHAT_MAX_TOKENS allows
+CHAT_SOURCE_PREVIEW_CHARS = 300
 
 # How many results to keep after merging chunks from all sections.
 # Raise these later if students tell you they want more.
@@ -255,6 +264,30 @@ class SummaryResponse(BaseModel):
     conclusion: str
 
 
+class ChatHistoryItem(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=CHAT_HISTORY_ITEM_MAX_CHARS)
+
+
+class ChatNotesInput(BaseModel):
+    notes: str = Field(min_length=1)
+    question: str = Field(min_length=1, max_length=CHAT_QUESTION_MAX_CHARS)
+    history: List[ChatHistoryItem] = Field(
+        default_factory=list, max_length=CHAT_HISTORY_MAX_ITEMS
+    )
+
+
+class ChatSource(BaseModel):
+    index: int
+    text: str
+    score: float
+
+
+class ChatNotesResponse(BaseModel):
+    answer: str
+    sources: List[ChatSource]
+
+
 # ── Core Groq helpers ────────────────────────────────────────────────────────
 
 def check_text_length(
@@ -289,12 +322,27 @@ def get_client() -> Groq:
 
 
 def create_chat_completion(prompt: str) -> Any:
+    """Single-prompt call used by flashcards / quiz / summary (unchanged behaviour)."""
+    return _run_chat_completion(
+        [{"role": "user", "content": prompt}], GROQ_MAX_TOKENS
+    )
+
+
+def create_messages_completion(
+    messages: list[dict], max_tokens: int = CHAT_MAX_TOKENS
+) -> Any:
+    """Multi-message call (system + history + question) used by chat with notes."""
+    return _run_chat_completion(messages, max_tokens)
+
+
+def _run_chat_completion(messages: list[dict], max_tokens: int) -> Any:
+    """Shared Groq call + error mapping, so both helpers fail the same way."""
     try:
         client = get_client()
         return client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=GROQ_MAX_TOKENS,
+            messages=messages,
+            max_tokens=max_tokens,
         )
     except HTTPException:
         raise
@@ -759,6 +807,72 @@ def _generate_summary(notes: str, chunks: list[str]) -> SummaryResponse:
 
     # Pass 2: produce the final structured summary from the combined mini-summaries
     return _summarise_text(combined)
+
+
+@app.post("/chat/notes", response_model=ChatNotesResponse)
+@limiter.limit("20/minute;200/day")
+def chat_with_notes(request: Request, payload: ChatNotesInput):
+    with generation_slot():
+        # Same guest / signed-in character limits as the generate endpoints.
+        user_id = get_verified_user_id(request)
+        is_guest = user_id is None
+        max_characters = GUEST_MAX_INPUT_CHARS if is_guest else MAX_INPUT_CHARS
+        notes = extract_notes(NotesInput(text=payload.notes), max_characters, is_guest)
+
+        question = payload.question.strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+        # One Groq call per question. Reserved before embedding so the daily
+        # budget also caps how much embedding work one client can trigger.
+        reserve_groq_budget(request, user_id, 1)
+
+        history = [item.model_dump() for item in payload.history]
+        try:
+            retrieved = retrieve(notes, retrieval_query(question, history))
+        except Exception as exc:
+            logger.exception("Notes retrieval failed")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "retrieval_error",
+                    "message": "Couldn't search your notes right now. Please try again.",
+                },
+            ) from exc
+
+        messages = build_messages(question, history, retrieved)
+
+        try:
+            response = create_messages_completion(messages)
+            answer = normalize_citations((response.choices[0].message.content or "").strip())
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Chat completion failed")
+            raise HTTPException(
+                status_code=502,
+                detail="The AI service failed. Please try again.",
+            ) from exc
+
+        if not answer:
+            raise HTTPException(
+                status_code=502,
+                detail="The AI returned an empty answer. Please try again.",
+            )
+
+        sources = [
+            ChatSource(
+                index=chunk.index,
+                text=(
+                    chunk.text[:CHAT_SOURCE_PREVIEW_CHARS].rstrip() + "…"
+                    if len(chunk.text) > CHAT_SOURCE_PREVIEW_CHARS
+                    else chunk.text
+                ),
+                score=round(chunk.score, 4),
+            )
+            for chunk in retrieved
+        ]
+        return ChatNotesResponse(answer=answer, sources=sources)
 
 
 if __name__ == "__main__":

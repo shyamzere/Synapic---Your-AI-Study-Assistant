@@ -8,3 +8,6 @@ __pycache__/
 *.pyc
 .DS_Store
 frontend/.env
+.claude/settings.local.json
+backend/model_cache/
+.pytest_cache/
