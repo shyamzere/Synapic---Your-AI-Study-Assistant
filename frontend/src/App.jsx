@@ -586,7 +586,7 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
       <DecorativeGlowLayer variant="landing" />
 
       {/* ── Nav ───────────────────────────────────────── */}
-      <nav className="flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 px-4 md:px-8 py-3 sticky top-0 z-40"
+      <nav className="flex flex-wrap lg:flex-nowrap items-center justify-between gap-y-2 px-4 md:px-8 py-3 sticky top-0 z-40"
         style={{
           background: C.navBg,
           backdropFilter: 'blur(16px)',
@@ -597,7 +597,7 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
           <img src={synapicLogo} alt="Synapic" className="h-11 md:h-16 w-auto object-contain" />
         </button>
 
-        <div className="flex gap-1 p-1 rounded-full order-last md:order-none w-full md:w-auto overflow-x-auto [scrollbar-width:none]"
+        <div className="flex gap-1 p-1 rounded-full order-last lg:order-none w-full lg:w-auto overflow-x-auto [scrollbar-width:none]"
           style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {APP_TABS.map(t => (
             <motion.button key={t.id} onClick={() => onSelectTab(t.id)}
@@ -626,7 +626,7 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
                 {user.email.split('@')[0]}
               </span>
               <button onClick={onSignOut}
-                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80"
+                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80 whitespace-nowrap"
                 style={{ color: C.textMuted, borderColor: C.border, background: C.bg }}>
                 Sign Out
               </button>
@@ -634,12 +634,12 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
           ) : (
             <>
               <button onClick={() => onAuth('signin')}
-                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80"
+                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80 whitespace-nowrap"
                 style={{ color: C.textMuted, borderColor: C.border, background: C.bg }}>
                 Sign In
               </button>
               <button onClick={() => onAuth('signup')}
-                className="px-4 py-2 rounded-full text-sm font-bold text-white transition-all hover:opacity-90"
+                className="px-4 py-2 rounded-full text-sm font-bold text-white transition-all hover:opacity-90 whitespace-nowrap"
                 style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
                 Sign Up Free
               </button>
@@ -1164,13 +1164,13 @@ function Toast({ message, onClose }) {
       initial={{ opacity: 0, y: 20, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 20, scale: 0.95 }}
-      className="fixed bottom-6 right-6 px-5 py-3 rounded-2xl shadow-2xl text-sm font-medium z-50 flex items-center gap-3"
+      role="status"
+      className="fixed bottom-4 left-4 right-4 sm:left-auto sm:bottom-6 sm:right-6 sm:max-w-xs px-5 py-3 rounded-2xl shadow-2xl text-sm font-medium z-50 flex items-center gap-3"
       style={{
         background: C.bgCard,
         color: C.text,
         border: `1px solid ${C.borderStrong}`,
         boxShadow: `0 18px 50px rgba(0,0,0,0.22), 0 0 0 1px ${C.accent}12`,
-        maxWidth: '320px',
       }}>
       <span style={{
         width: '9px',
@@ -1307,8 +1307,8 @@ function ChatAnswerText({ text }) {
         if (citation) {
           return (
             <span key={i}
-              className="inline-flex items-center justify-center align-text-top mx-0.5 px-1.5 rounded-md text-[11px] font-bold"
-              style={{ background: C.accentLight, color: C.accentDark, minWidth: '18px', height: '18px' }}>
+              className="inline-flex items-center justify-center align-text-top mx-0.5 px-1.5 rounded-md text-[0.7rem] font-bold"
+              style={{ background: C.accentLight, color: C.accentDark, minWidth: '1.125rem', height: '1.125rem' }}>
               {citation[1]}
             </span>
           )
@@ -1427,7 +1427,7 @@ function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
 
       {/* Message list */}
       <div ref={listRef} className="px-6 py-5 space-y-4 overflow-y-auto"
-        style={{ minHeight: '260px', maxHeight: '520px' }}
+        style={{ minHeight: '16rem', maxHeight: 'min(32rem, 60vh)' }}
         aria-live="polite">
         {messages.length === 0 && !loading && (
           <div className="text-center py-10">
@@ -1501,7 +1501,7 @@ function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
             onBlur={e => e.target.style.borderColor = C.border}
             placeholder={hasNotes ? 'Ask a question about your notes...' : 'Paste your notes above to start chatting'}
             aria-label="Ask a question about your notes"
-            className="flex-1 rounded-2xl px-4 py-3 text-sm resize-none focus:outline-none transition-all disabled:opacity-50"
+            className="flex-1 min-w-0 rounded-2xl px-4 py-3 text-base sm:text-sm resize-none focus:outline-none transition-all disabled:opacity-50"
             style={{ background: C.bg, border: `1.5px solid ${C.border}`, color: C.text }}
           />
           <motion.button
@@ -1984,7 +1984,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* ── Nav ──────────────────────────────────────────── */}
-      <nav className="flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 px-4 md:px-8 py-3 sticky top-0 z-40"
+      <nav className="flex flex-wrap lg:flex-nowrap items-center justify-between gap-y-2 px-4 md:px-8 py-3 sticky top-0 z-40"
         style={{
           background: C.navBg,
           backdropFilter: 'blur(16px)',
@@ -1995,7 +1995,7 @@ export default function App() {
         </button>
 
         {/* Tab switcher - pill style matching Image 2 */}
-        <div className="flex gap-1 p-1 rounded-full order-last md:order-none w-full md:w-auto overflow-x-auto [scrollbar-width:none]"
+        <div className="flex gap-1 p-1 rounded-full order-last lg:order-none w-full lg:w-auto overflow-x-auto [scrollbar-width:none]"
           style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {APP_TABS.map(t => (
             <motion.button key={t.id} onClick={() => t.id === 'decks' && !user ? openAuth('signin') : setTab(t.id)}
@@ -2026,7 +2026,7 @@ export default function App() {
                 {user.email.split('@')[0]}
               </span>
               <button onClick={() => supabase.auth.signOut()}
-                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80"
+                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80 whitespace-nowrap"
                 style={{ color: C.textMuted, borderColor: C.border, background: C.bg }}>
                 Sign Out
               </button>
@@ -2034,12 +2034,12 @@ export default function App() {
           ) : (
             <>
               <button onClick={() => openAuth('signin')}
-                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80"
+                className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80 whitespace-nowrap"
                 style={{ color: C.textMuted, borderColor: C.border, background: C.bg }}>
                 Sign In
               </button>
               <button onClick={() => openAuth('signup')}
-                className="px-4 py-2 rounded-full text-sm font-bold text-white transition-all hover:opacity-90"
+                className="px-4 py-2 rounded-full text-sm font-bold text-white transition-all hover:opacity-90 whitespace-nowrap"
                 style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
                 Sign Up Free
               </button>
@@ -2049,13 +2049,13 @@ export default function App() {
       </nav>
 
       {/* ── Main content ─────────────────────────────────── */}
-      <div className="max-w-4xl mx-auto px-6 py-10 relative z-10">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 sm:py-10 relative z-10">
 
         {/* Input section - only show on non-decks tabs */}
         <AnimatePresence mode="wait">
           {!['decks', 'settings'].includes(tab) && (
             <motion.div key="input-section" {...fadeUp}
-              className="rounded-3xl p-8 mb-8 shadow-sm"
+              className="rounded-3xl p-5 sm:p-8 mb-8 shadow-sm"
               style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
 
               {/* Heading */}
@@ -2074,7 +2074,7 @@ export default function App() {
                   tab === 'chat' ? 'Check the sources' : 'Study the results',
                 ].map((step, i) => (
                   <li key={step} className="flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-black"
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[0.7rem] font-black"
                       style={{ background: C.accentLight, color: C.accentDark }}>
                       {i + 1}
                     </span>
@@ -2172,7 +2172,7 @@ export default function App() {
                 onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragActive(false) }}
                 onDrop={handleNotesDrop}>
                 <textarea
-                  className="w-full h-44 rounded-2xl p-4 text-sm resize-none focus:outline-none transition-all"
+                  className="w-full h-44 rounded-2xl p-4 text-base sm:text-sm resize-none focus:outline-none transition-all"
                   style={{
                     background: C.bg,
                     border: `1.5px solid ${dragActive ? C.accent : C.border}`,
@@ -2206,7 +2206,7 @@ export default function App() {
               )}
 
               {/* Footer row: char counter + generate button */}
-              <div className="flex items-center justify-between mt-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
                 <div className="flex items-center gap-3">
                   <p className="text-xs"
                     style={{
@@ -2235,7 +2235,7 @@ export default function App() {
                   whileTap={{ scale: 0.97 }}
                   onClick={generate}
                   disabled={loading || !notes.trim() || notes.length > currentInputLimit}
-                  className="flex items-center gap-2 px-6 py-3 rounded-full font-bold text-white text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-full font-bold text-white text-sm disabled:opacity-40 disabled:cursor-not-allowed"
                   style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
                   {loading ? (
                     <>
@@ -2337,7 +2337,7 @@ export default function App() {
                             maxLength={80}
                             aria-label="Saved deck name"
                             placeholder="Deck name"
-                            className="w-44 px-3 py-1.5 rounded-full text-xs font-semibold outline-none transition-all"
+                            className="w-44 px-3 py-1.5 rounded-full text-base sm:text-xs font-semibold outline-none transition-all"
                             style={{
                               background: C.bgCard,
                               color: C.text,
@@ -2398,7 +2398,7 @@ export default function App() {
                             style={{
                               transformStyle: 'preserve-3d',
                               position: 'relative',
-                              minHeight: '144px',
+                              minHeight: '9rem', // rem so it grows with text on big screens
                               cursor: 'pointer',
                               willChange: 'transform',
                             }}>
@@ -2483,7 +2483,7 @@ export default function App() {
                             }}
                             style={{
                               position: 'relative',
-                              minHeight: '280px',
+                              minHeight: '17.5rem',
                               willChange: 'transform',
                             }}>
                             <motion.div

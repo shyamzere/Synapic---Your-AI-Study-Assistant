@@ -10,6 +10,19 @@
     min-height: 100%;
   }
 
+  /* Big monitors and TVs: everything sized in rem (text, spacing, the
+     content width) grows with the root font size, so the app stays readable
+     instead of becoming a small island in the middle of the screen. */
+  @media (min-width: 2200px) {
+    html { font-size: 125%; }
+  }
+  @media (min-width: 2800px) {
+    html { font-size: 150%; }
+  }
+  @media (min-width: 3400px) {
+    html { font-size: 175%; }
+  }
+
   body {
     margin: 0;
     background-color: rgb(3 7 18);
