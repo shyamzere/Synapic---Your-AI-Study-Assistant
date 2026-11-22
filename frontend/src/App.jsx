@@ -585,7 +585,7 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
       <DecorativeGlowLayer variant="landing" />
 
       {/* ── Nav ───────────────────────────────────────── */}
-      <nav className="flex items-center justify-between px-8 py-3 sticky top-0 z-40"
+      <nav className="flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 px-4 md:px-8 py-3 sticky top-0 z-40"
         style={{
           background: C.navBg,
           backdropFilter: 'blur(16px)',
@@ -593,14 +593,14 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
         }}>
         <button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
           className="transition-opacity hover:opacity-70">
-          <img src={synapicLogo} alt="Synapic" className="h-16 w-auto object-contain" />
+          <img src={synapicLogo} alt="Synapic" className="h-11 md:h-16 w-auto object-contain" />
         </button>
 
-        <div className="flex gap-1 p-1 rounded-full"
+        <div className="flex gap-1 p-1 rounded-full order-last md:order-none w-full md:w-auto overflow-x-auto [scrollbar-width:none]"
           style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {APP_TABS.map(t => (
             <motion.button key={t.id} onClick={() => onSelectTab(t.id)}
-              className="px-4 py-2 rounded-full text-sm font-semibold transition-all relative"
+              className="px-3 md:px-4 py-2 rounded-full text-sm font-semibold transition-all relative whitespace-nowrap flex-shrink-0"
               style={activeTab === t.id
                 ? { color: 'white' }
                 : { color: C.textMuted, background: 'transparent' }
@@ -618,7 +618,7 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
           ))}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 md:gap-3">
           {user ? (
             <>
               <span className="text-sm hidden md:block" style={{ color: C.textMuted }}>
@@ -1291,7 +1291,8 @@ const chatErrorMessage = (err) => {
   if (status === 413) return 'Your notes are too large to send.'
   if (status === 422) return 'That message could not be sent. Try a shorter question.'
   if (status === 502 || status === 503) return backendMessage || 'The AI service failed. Please try again.'
-  return 'Something went wrong. Is the backend running?'
+  if (!err?.response) return "Couldn't reach Synapic. The server may be waking up - try again in 30 seconds."
+  return 'Something went wrong on our side. Please try again.'
 }
 
 // Renders an answer with [1]-style citations as small teal badges and
@@ -1718,8 +1719,11 @@ export default function App() {
         setToast(detail?.message || 'Rate limit reached - wait ~60 seconds and try again.')
       } else if (status === 413) {
         setToast('That text is too large to send.')
+      } else if (!err?.response) {
+        // No response at all: offline, or the free server is still waking up.
+        setToast("Couldn't reach Synapic. The server may be waking up - try again in 30 seconds.")
       } else {
-        setToast('Something went wrong. Is the backend running?')
+        setToast(typeof detail === 'string' ? detail : 'Something went wrong on our side. Please try again.')
       }
     }
     setLoading(false)
@@ -1885,9 +1889,9 @@ export default function App() {
   )
 
   const headings = {
-    flashcards: 'Create Study Materials',
-    quizzes: 'Create Study Materials',
-    summary: 'Create Study Materials',
+    flashcards: 'Make Flashcards',
+    quizzes: 'Make a Quiz',
+    summary: 'Summarise Your Notes',
     chat: 'Chat With Your Notes',
   }
 
@@ -1930,22 +1934,22 @@ export default function App() {
       </AnimatePresence>
 
       {/* ── Nav ──────────────────────────────────────────── */}
-      <nav className="flex items-center justify-between px-8 py-3 sticky top-0 z-40"
+      <nav className="flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 px-4 md:px-8 py-3 sticky top-0 z-40"
         style={{
           background: C.navBg,
           backdropFilter: 'blur(16px)',
           borderBottom: `1px solid ${C.border}`
         }}>
         <button onClick={() => setPage('landing')} className="transition-opacity hover:opacity-70">
-          <img src={synapicLogo} alt="Synapic" className="h-16 w-auto object-contain" />
+          <img src={synapicLogo} alt="Synapic" className="h-11 md:h-16 w-auto object-contain" />
         </button>
 
         {/* Tab switcher - pill style matching Image 2 */}
-        <div className="flex gap-1 p-1 rounded-full"
+        <div className="flex gap-1 p-1 rounded-full order-last md:order-none w-full md:w-auto overflow-x-auto [scrollbar-width:none]"
           style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {APP_TABS.map(t => (
             <motion.button key={t.id} onClick={() => t.id === 'decks' && !user ? openAuth('signin') : setTab(t.id)}
-              className="px-4 py-2 rounded-full text-sm font-semibold transition-all relative"
+              className="px-3 md:px-4 py-2 rounded-full text-sm font-semibold transition-all relative whitespace-nowrap flex-shrink-0"
               style={tab === t.id
                 ? { color: 'white' }
                 : { color: C.textMuted, background: 'transparent' }
@@ -1965,7 +1969,7 @@ export default function App() {
         </div>
 
         {/* User + sign out */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 md:gap-3">
           {user ? (
             <>
               <span className="text-sm hidden md:block" style={{ color: C.textMuted }}>
@@ -2008,9 +2012,26 @@ export default function App() {
               <h2 className="text-3xl font-black mb-2" style={{ color: C.text }}>
                 {headings[tab]}
               </h2>
-              <p className="text-sm mb-5 leading-relaxed" style={{ color: C.textMuted }}>
+              <p className="text-sm mb-4 leading-relaxed" style={{ color: C.textMuted }}>
                 {subheadings[tab]}
               </p>
+
+              {/* How it works, in three steps */}
+              <ol className="flex flex-wrap gap-x-5 gap-y-2 mb-5 text-xs font-semibold" style={{ color: C.textMuted }}>
+                {[
+                  'Add your notes',
+                  tab === 'chat' ? 'Ask a question below' : `Press ${btnLabels[tab]}`,
+                  tab === 'chat' ? 'Check the sources' : 'Study the results',
+                ].map((step, i) => (
+                  <li key={step} className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-black"
+                      style={{ background: C.accentLight, color: C.accentDark }}>
+                      {i + 1}
+                    </span>
+                    {step}
+                  </li>
+                ))}
+              </ol>
 
               {inputNotes[tab] && (
                 <div
@@ -2079,7 +2100,7 @@ export default function App() {
 
               {/* Footer row: char counter + generate button */}
               <div className="flex items-center justify-between mt-3">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                   <p className="text-xs"
                     style={{
                       color: notes.length > currentInputLimit ? C.danger : C.textLight,
@@ -2089,6 +2110,13 @@ export default function App() {
                       ? `${notes.length.toLocaleString()} / ${currentInputLimit.toLocaleString()} characters${notes.length > currentInputLimit ? ' - too long' : ''}`
                       : 'Supports plain text'}
                   </p>
+                  {notes.length > 0 && !loading && (
+                    <button type="button" onClick={() => handleNotesChange('')}
+                      className="text-xs font-semibold hover:underline"
+                      style={{ color: C.textMuted }}>
+                      Clear
+                    </button>
+                  )}
                 </div>
                 {tab === 'chat' ? (
                   <p className="text-xs font-semibold" style={{ color: C.accent }}>
@@ -2114,6 +2142,11 @@ export default function App() {
                 </motion.button>
                 )}
               </div>
+              {loading && (
+                <p className="text-xs mt-3 text-right" style={{ color: C.textMuted }}>
+                  Long notes can take up to a minute. If the server was asleep, the first request takes a little longer.
+                </p>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -2178,7 +2211,7 @@ export default function App() {
 
               {!loading && flashcards.length === 0 && (
                 <EmptyState icon="" title="Ready to Make Flashcards?"
-                  subtitle="Paste your notes above and hit generate." />
+                  subtitle="Add your notes above, then press Generate Flashcards. Your cards will appear here." />
               )}
 
               {!loading && flashcards.length > 0 && (
@@ -2233,6 +2266,12 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+
+                  <p className="text-xs mb-3" style={{ color: C.textLight }}>
+                    {studyMode === 'grid'
+                      ? 'Click a card to flip it and see the answer.'
+                      : 'Click the card or press Space to flip. Use the arrow keys to move between cards.'}
+                  </p>
 
                   {/* Grid view */}
                   {studyMode === 'grid' && (
@@ -2452,7 +2491,7 @@ export default function App() {
 
               {!loading && !quiz && (
                 <EmptyState icon="" title="Ready to Quiz Yourself?"
-                  subtitle="Paste your notes above and hit generate." />
+                  subtitle="Add your notes above, then press Generate Quiz. Questions will appear here." />
               )}
 
               {!loading && quiz && (
@@ -2554,7 +2593,7 @@ export default function App() {
                               animate={{ opacity: 1, height: 'auto' }}
                               className="mt-4 px-4 py-3 rounded-xl text-sm leading-relaxed flex items-start gap-2"
                               style={{ background: C.accentLight, color: C.accentDark }}>
-                              <span className="flex-shrink-0">Info</span>
+                              <span className="flex-shrink-0 font-bold">Why:</span>
                               <span>{q.explanation}</span>
                             </motion.div>
                           )}
@@ -2564,24 +2603,44 @@ export default function App() {
                   })}
 
                   {!quizSubmitted && (
-                    <motion.button
-                      whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                      onClick={() => setQuizSubmitted(true)}
-                      disabled={Object.keys(quizAnswers).length < quiz.length}
-                      className="px-8 py-3 rounded-full font-bold text-white text-sm disabled:opacity-40"
-                      style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
-                      Submit Quiz 
-                    </motion.button>
+                    <div className="flex flex-wrap items-center gap-4">
+                      <motion.button
+                        whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                        onClick={() => setQuizSubmitted(true)}
+                        disabled={Object.keys(quizAnswers).length < quiz.length}
+                        className="px-8 py-3 rounded-full font-bold text-white text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
+                        Submit Quiz
+                      </motion.button>
+                      {/* Explain why Submit is disabled instead of leaving people guessing */}
+                      <p className="text-sm" style={{ color: C.textMuted }}>
+                        {Object.keys(quizAnswers).length} of {quiz.length} answered
+                        {Object.keys(quizAnswers).length < quiz.length && ' - answer every question to submit'}
+                      </p>
+                    </div>
                   )}
 
                   {quizSubmitted && (
-                    <motion.button
-                      whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                      onClick={() => { setQuiz(null); setQuizAnswers({}); setQuizSubmitted(false) }}
-                      className="px-8 py-3 rounded-full font-semibold text-sm"
-                      style={{ background: C.bgCard, color: C.text, border: `1px solid ${C.border}` }}>
-                      Try Again
-                    </motion.button>
+                    <div className="flex flex-wrap gap-3">
+                      <motion.button
+                        whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                        onClick={() => {
+                          setQuizAnswers({})
+                          setQuizSubmitted(false)
+                          window.scrollTo({ top: 0, behavior: shouldReduceMotion ? 'auto' : 'smooth' })
+                        }}
+                        className="px-8 py-3 rounded-full font-bold text-white text-sm"
+                        style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}30` }}>
+                        Retake Quiz
+                      </motion.button>
+                      <motion.button
+                        whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                        onClick={generate}
+                        className="px-8 py-3 rounded-full font-semibold text-sm"
+                        style={{ background: C.bgCard, color: C.text, border: `1px solid ${C.border}` }}>
+                        New Questions
+                      </motion.button>
+                    </div>
                   )}
                 </div>
               )}
@@ -2597,7 +2656,7 @@ export default function App() {
 
               {!loading && !summary && (
                 <EmptyState icon="" title="Ready to Summarise?"
-                  subtitle="Paste your notes above and hit generate." />
+                  subtitle="Add your notes above, then press Summarise Notes. Your summary will appear here." />
               )}
 
               {!loading && summary && (
@@ -2623,7 +2682,7 @@ export default function App() {
                     <div className="flex items-center gap-2 mb-3">
                       <div className="w-8 h-8 rounded-lg flex items-center justify-center"
                         style={{ background: C.accentLight }}>
-                        <span className="text-xs font-black">OV</span>
+                        <span aria-hidden="true">📖</span>
                       </div>
                       <p className="font-bold" style={{ color: C.text }}>Overview</p>
                     </div>
@@ -2639,7 +2698,7 @@ export default function App() {
                       <div className="flex items-center gap-2 mb-4">
                         <div className="w-8 h-8 rounded-lg flex items-center justify-center"
                           style={{ background: C.accentLight }}>
-                          <span className="text-xs font-black">KP</span>
+                          <span aria-hidden="true">🔑</span>
                         </div>
                         <p className="font-bold" style={{ color: C.text }}>Key Points</p>
                       </div>
@@ -2662,8 +2721,8 @@ export default function App() {
                       style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
                       <div className="flex items-center gap-2 mb-4">
                         <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-                          style={{ background: '#FEF3C7' }}>
-                          <span className="text-xs font-black">OK</span>
+                          style={{ background: darkMode ? 'rgba(251,191,36,0.15)' : '#FEF3C7' }}>
+                          <span aria-hidden="true">✅</span>
                         </div>
                         <p className="font-bold" style={{ color: C.text }}>Conclusion</p>
                       </div>
@@ -2678,7 +2737,7 @@ export default function App() {
                       onClick={() => setTab('quizzes')}
                       className="flex-1 py-4 rounded-2xl font-bold text-white text-base"
                       style={{ background: C.accentGrad, boxShadow: `0 4px 20px ${C.accent}30` }}>
-                      Ready to Quiz?
+                      Quiz me on these notes →
                     </motion.button>
                     <ChatWithNotesButton onClick={openChat} className="sm:w-auto py-4 px-8 rounded-2xl text-base" />
                   </motion.div>
