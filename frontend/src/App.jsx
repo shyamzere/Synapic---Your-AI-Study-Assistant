@@ -4,6 +4,7 @@ import { motion, AnimatePresence, useMotionValue, useSpring, useInView, useTrans
 import synapicLogo from './assets/synapicLogo1.png'
 import { supabase } from './supabase'
 import Authentication from './Authentication'
+import { extractPdfText, isPdfFile, PdfReadError } from './pdfText'
 
 // ── Design tokens ────────────────────────────────────────────
 const LIGHT_THEME = {
@@ -1556,6 +1557,11 @@ export default function App() {
   const [chatLoading, setChatLoading] = useState(false)
   const chatSessionRef = useRef(0)   // bumps when the chat is reset
   const chatMessageIdRef = useRef(0) // unique React keys for messages
+  // PDF upload
+  const [pdfProgress, setPdfProgress] = useState(null) // { done, total } while reading
+  const [notesSource, setNotesSource] = useState(null) // { name, pagesRead, pageCount, truncated }
+  const [dragActive, setDragActive] = useState(false)
+  const fileInputRef = useRef(null)
 
   C = darkMode ? DARK_THEME : LIGHT_THEME
 
@@ -1740,7 +1746,51 @@ export default function App() {
 
   const handleNotesChange = (value) => {
     setNotes(value)
+    if (!value) setNotesSource(null)
     resetChat() // answers about the old notes would be misleading
+  }
+
+  // ── PDF upload ────────────────────────────────────────────
+  // The PDF is read in the browser; its text replaces the notes, so every
+  // feature (flashcards, quiz, summary, chat) works on it unchanged.
+  const handlePdfFile = async (file) => {
+    if (!file || pdfProgress) return
+    setPdfProgress({ done: 0, total: 0 })
+    try {
+      const result = await extractPdfText(file, {
+        maxChars: currentInputLimit,
+        onProgress: (done, total) => setPdfProgress({ done, total }),
+      })
+      handleNotesChange(result.text)
+      setNotesSource({ name: file.name, ...result })
+      if (result.truncated) {
+        setToast(user
+          ? `That PDF is long, so we kept the first ${currentInputLimit.toLocaleString()} characters (up to page ${result.pagesRead} of ${result.pageCount}).`
+          : `Guests can use ${currentInputLimit.toLocaleString()} characters, so we kept up to page ${result.pagesRead} of ${result.pageCount}. Sign up free for up to 100,000.`)
+      } else {
+        setToast(`Loaded ${result.pageCount} page${result.pageCount === 1 ? '' : 's'} from ${file.name}`)
+      }
+    } catch (err) {
+      setToast(err instanceof PdfReadError ? err.message : "Couldn't read that PDF. Please try another file.")
+    } finally {
+      setPdfProgress(null)
+    }
+  }
+
+  // Only react to files being dragged (dragging text should still work normally).
+  const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files')
+
+  const handleNotesDrop = (e) => {
+    if (!isFileDrag(e)) return
+    e.preventDefault()
+    setDragActive(false)
+    const file = e.dataTransfer.files?.[0]
+    if (!file) return
+    if (!isPdfFile(file)) {
+      setToast('Only PDF files can be dropped here. For other files, copy and paste the text.')
+      return
+    }
+    handlePdfFile(file)
   }
 
   // Returns true if the question was answered, false if it failed.
@@ -2019,7 +2069,7 @@ export default function App() {
               {/* How it works, in three steps */}
               <ol className="flex flex-wrap gap-x-5 gap-y-2 mb-5 text-xs font-semibold" style={{ color: C.textMuted }}>
                 {[
-                  'Add your notes',
+                  'Paste notes or upload a PDF',
                   tab === 'chat' ? 'Ask a question below' : `Press ${btnLabels[tab]}`,
                   tab === 'chat' ? 'Check the sources' : 'Study the results',
                 ].map((step, i) => (
@@ -2071,20 +2121,77 @@ export default function App() {
                 </p>
               )}
 
-              {/* Textarea */}
-              <textarea
-                className="w-full h-44 rounded-2xl p-4 text-sm resize-none focus:outline-none transition-all"
-                style={{
-                  background: C.bg,
-                  border: `1.5px solid ${C.border}`,
-                  color: C.text,
-                }}
-                onFocus={e => e.target.style.borderColor = C.accent}
-                onBlur={e => e.target.style.borderColor = C.border}
-                placeholder="Paste your lecture notes or textbook chapters here..."
-                value={notes}
-                onChange={e => handleNotesChange(e.target.value)}
-              />
+              {/* PDF upload row */}
+              <div className="flex flex-wrap items-center gap-3 mb-3">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  className="hidden"
+                  aria-label="Upload a PDF"
+                  onChange={e => {
+                    handlePdfFile(e.target.files?.[0])
+                    e.target.value = '' // let the same file be picked again later
+                  }}
+                />
+                <motion.button type="button"
+                  whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={Boolean(pdfProgress) || loading}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold disabled:opacity-60 disabled:cursor-not-allowed"
+                  style={{ background: C.accentLight, color: C.accentDark, border: `1px solid ${C.accent}30` }}>
+                  {pdfProgress ? (
+                    <>
+                      <span className="w-3.5 h-3.5 rounded-full border-2 animate-spin"
+                        style={{ borderColor: `${C.accent}50`, borderTopColor: C.accent }} />
+                      {pdfProgress.total
+                        ? `Reading page ${pdfProgress.done} of ${pdfProgress.total}...`
+                        : 'Opening PDF...'}
+                    </>
+                  ) : (
+                    <><span aria-hidden="true">📄</span> Upload PDF</>
+                  )}
+                </motion.button>
+                {notesSource ? (
+                  <span className="text-xs" style={{ color: C.textMuted }}>
+                    From <strong style={{ color: C.text }}>{notesSource.name}</strong>
+                    {' '}· {notesSource.truncated
+                      ? `pages 1-${notesSource.pagesRead} of ${notesSource.pageCount} (trimmed to fit)`
+                      : `${notesSource.pageCount} page${notesSource.pageCount === 1 ? '' : 's'}`}
+                  </span>
+                ) : (
+                  <span className="text-xs" style={{ color: C.textLight }}>
+                    or drag a PDF onto the box below
+                  </span>
+                )}
+              </div>
+
+              {/* Textarea (also a drop zone for PDFs) */}
+              <div className="relative"
+                onDragOver={e => { if (isFileDrag(e)) { e.preventDefault(); setDragActive(true) } }}
+                onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragActive(false) }}
+                onDrop={handleNotesDrop}>
+                <textarea
+                  className="w-full h-44 rounded-2xl p-4 text-sm resize-none focus:outline-none transition-all"
+                  style={{
+                    background: C.bg,
+                    border: `1.5px solid ${dragActive ? C.accent : C.border}`,
+                    color: C.text,
+                  }}
+                  onFocus={e => e.target.style.borderColor = C.accent}
+                  onBlur={e => e.target.style.borderColor = C.border}
+                  placeholder="Paste your lecture notes or textbook chapters here, or upload a PDF..."
+                  aria-label="Your notes"
+                  value={notes}
+                  onChange={e => handleNotesChange(e.target.value)}
+                />
+                {dragActive && (
+                  <div className="absolute inset-0 rounded-2xl flex items-center justify-center text-sm font-bold pointer-events-none"
+                    style={{ background: `${C.accentLight}EE`, color: C.accentDark, border: `2px dashed ${C.accent}` }}>
+                    Drop your PDF to load its text
+                  </div>
+                )}
+              </div>
 
               {!user && notes.length > GUEST_MAX_INPUT_CHARS && (
                 <p className="mt-2 text-xs" style={{ color: C.danger }}>
@@ -2108,7 +2215,7 @@ export default function App() {
                     }}>
                     {notes.length > 0
                       ? `${notes.length.toLocaleString()} / ${currentInputLimit.toLocaleString()} characters${notes.length > currentInputLimit ? ' - too long' : ''}`
-                      : 'Supports plain text'}
+                      : 'Plain text or PDF'}
                   </p>
                   {notes.length > 0 && !loading && (
                     <button type="button" onClick={() => handleNotesChange('')}
