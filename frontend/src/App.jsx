@@ -6,6 +6,10 @@ import { supabase } from './supabase'
 import Authentication from './Authentication'
 import { extractPdfText, isPdfFile, PdfReadError } from './pdfText'
 import { joinSpokenText, useSpeechToText } from './useSpeechToText'
+import AccountSettings, { Avatar } from './AccountSettings'
+import { displayNameFor } from './avatar'
+import ReviewSession from './ReviewSession'
+import { isDue } from './spacedRepetition'
 
 // ── Design tokens ────────────────────────────────────────────
 const LIGHT_THEME = {
@@ -623,8 +627,9 @@ function Landing({ onEnter, onSelectTab, activeTab, onAuth, user, onSignOut }) {
         <div className="flex items-center gap-2 md:gap-3">
           {user ? (
             <>
-              <span className="text-sm hidden md:block" style={{ color: C.textMuted }}>
-                {user.email.split('@')[0]}
+              <span className="hidden md:flex items-center gap-2 text-sm min-w-0 max-w-48" style={{ color: C.textMuted }}>
+                <Avatar C={C} user={user} size={28} />
+                <span className="truncate">{displayNameFor(user)}</span>
               </span>
               <button onClick={onSignOut}
                 className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80 whitespace-nowrap"
@@ -1632,8 +1637,15 @@ export default function App() {
   const flashcardNotesRef = useRef('') // the notes the current flashcards came from
   const [dragActive, setDragActive] = useState(false)
   const fileInputRef = useRef(null)
+  // Account + spaced repetition
+  const [recoveryMode, setRecoveryMode] = useState(false) // opened a password-reset link
+  const [dueCounts, setDueCounts] = useState(null) // { [deckId]: n } or null if not set up
+  const [review, setReview] = useState(null) // { title, cards, otherDueAt } while reviewing
+  const [startingReview, setStartingReview] = useState(null) // deck id or 'all'
+  const reviewSaveFailedRef = useRef(false)
 
   C = darkMode ? DARK_THEME : LIGHT_THEME
+  const totalDue = dueCounts ? Object.values(dueCounts).reduce((sum, n) => sum + n, 0) : 0
 
   const goToStudyCard = useCallback((nextCard) => {
     if (nextCard === currentCard) return
@@ -1662,9 +1674,17 @@ export default function App() {
       setUser(session?.user ?? null)
       setAuthLoading(false)
     })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null)
       setAuthLoading(false)
+      if (event === 'PASSWORD_RECOVERY') {
+        // They clicked a "reset password" email link: take them to Settings
+        // so they can choose a new password.
+        setRecoveryMode(true)
+        setPage('app')
+        setTab('settings')
+      }
+      if (event === 'SIGNED_OUT') setRecoveryMode(false)
       if (session?.user) {
         localStorage.removeItem('synapic_guest_generations')
         setGuestGenerations(0)
@@ -1676,7 +1696,9 @@ export default function App() {
   // ── Keyboard shortcuts for study mode ────────────────────
   useEffect(() => {
     const handler = e => {
-      if (flashcards.length === 0 || studyMode !== 'study') return
+      if (tab !== 'flashcards' || flashcards.length === 0 || studyMode !== 'study') return
+      // Don't steal Space/arrow keys while typing in a box.
+      if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return
       if (e.key === 'ArrowRight') goToStudyCard(Math.min(currentCard + 1, flashcards.length - 1))
       if (e.key === 'ArrowLeft') goToStudyCard(Math.max(currentCard - 1, 0))
       if (e.key === ' ') {
@@ -1686,7 +1708,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [flashcards, studyMode, currentCard, goToStudyCard])
+  }, [tab, flashcards, studyMode, currentCard, goToStudyCard])
 
   // ── Guest generation helpers ──────────────────────────────
   const incrementGuestGenerations = () => {
@@ -1977,6 +1999,25 @@ export default function App() {
         .select('id', { count: 'exact', head: true })
         .in('deck_id', data.map(d => d.id))
       setDeckStats({ totalCards: count || 0 })
+
+      // How many cards in each deck are due for review. If the spaced
+      // repetition columns haven't been added to the database yet, this
+      // fails and the review buttons stay hidden.
+      if (data.length === 0) {
+        setDueCounts({})
+      } else {
+        const { data: schedule, error: scheduleError } = await supabase
+          .from('flashcards').select('deck_id, due_at').in('deck_id', data.map(d => d.id))
+        if (scheduleError) {
+          setDueCounts(null)
+        } else {
+          const counts = {}
+          for (const row of schedule || []) {
+            if (isDue(row)) counts[row.deck_id] = (counts[row.deck_id] || 0) + 1
+          }
+          setDueCounts(counts)
+        }
+      }
     } catch (err) {
       console.error(err)
     }
@@ -2030,6 +2071,63 @@ export default function App() {
     } finally {
       setOpeningDeck(null)
     }
+  }
+
+  // ── Spaced repetition review ──────────────────────────────
+  // deck = one saved deck, or null for "every deck".
+  const startReview = async (deck) => {
+    if (startingReview || !user) return
+    const deckIds = deck ? [deck.id] : savedDecks.map(d => d.id)
+    if (deckIds.length === 0) return
+    setStartingReview(deck ? deck.id : 'all')
+    try {
+      const { data, error } = await supabase
+        .from('flashcards')
+        .select('id, deck_id, question, answer, ease, interval_days, repetitions, due_at')
+        .in('deck_id', deckIds)
+      if (error) throw error
+      const now = new Date()
+      const due = (data || []).filter(card => isDue(card, now))
+        // Most overdue first; brand-new cards keep their saved order.
+        .sort((a, b) => new Date(a.due_at || 0) - new Date(b.due_at || 0))
+      const later = (data || []).filter(card => !isDue(card, now)).map(card => card.due_at).sort()
+      if (due.length === 0) {
+        setToast(later.length ? 'Nothing is due right now. Come back later!' : 'This deck has no cards yet.')
+        return
+      }
+      reviewSaveFailedRef.current = false
+      recordStudySession()
+      setReview({ title: deck ? deck.title : 'All decks', cards: due, otherDueAt: later[0] || null })
+      window.scrollTo({ top: 0, behavior: shouldReduceMotion ? 'auto' : 'smooth' })
+    } catch {
+      setToast("Couldn't start the review. Please try again.")
+    } finally {
+      setStartingReview(null)
+    }
+  }
+
+  const saveReviewRating = async (card, _rating, update) => {
+    // .select() returns the changed rows; none back means it wasn't saved
+    // (for example the database isn't allowing updates yet).
+    const { data, error } = await supabase.from('flashcards').update(update).eq('id', card.id).select('id')
+    if ((error || !data?.length) && !reviewSaveFailedRef.current) {
+      reviewSaveFailedRef.current = true // tell them once, not on every card
+      setToast("Couldn't save your review progress. Check your connection.")
+    }
+  }
+
+  const endReview = () => {
+    setReview(null)
+    loadDecks() // refresh the due counts
+  }
+
+  const handleAccountDeleted = () => {
+    if (user) localStorage.removeItem(`synapic_study_streak_${user.id}`)
+    setSavedDecks([])
+    setFlashcards([])
+    setReview(null)
+    setTab('flashcards') // stay in the app as a guest so they see the message
+    setToast('Your account and all its data have been deleted.')
   }
 
   const openAuth = (mode = 'signin') => {
@@ -2158,9 +2256,13 @@ export default function App() {
         <div className="flex items-center gap-2 md:gap-3">
           {user ? (
             <>
-              <span className="text-sm hidden md:block" style={{ color: C.textMuted }}>
-                {user.email.split('@')[0]}
-              </span>
+              <button type="button" onClick={() => setTab('settings')}
+                aria-label={`Account settings for ${displayNameFor(user)}`}
+                className="flex items-center gap-2 text-sm min-w-0 max-w-48 rounded-full transition-opacity hover:opacity-80"
+                style={{ color: C.textMuted }}>
+                <Avatar C={C} user={user} size={28} />
+                <span className="truncate hidden md:block">{displayNameFor(user)}</span>
+              </button>
               <button onClick={() => supabase.auth.signOut()}
                 className="px-4 py-2 rounded-full text-sm font-semibold border transition-all hover:opacity-80 whitespace-nowrap"
                 style={{ color: C.textMuted, borderColor: C.border, background: C.bg }}>
@@ -2452,6 +2554,26 @@ export default function App() {
                   />
                 </button>
               </motion.div>
+
+              <h3 className="text-xl font-black mt-8 mb-3" style={{ color: C.text }}>Account</h3>
+              {user ? (
+                <AccountSettings key={user.id} theme={C} user={user} onToast={setToast}
+                  recoveryMode={recoveryMode}
+                  onRecoveryDone={() => setRecoveryMode(false)}
+                  onAccountDeleted={handleAccountDeleted} />
+              ) : (
+                <div className="rounded-2xl p-6 flex flex-wrap items-center justify-between gap-4"
+                  style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+                  <p className="text-sm" style={{ color: C.textMuted }}>
+                    Sign in to set a profile picture and name, and change your email or password.
+                  </p>
+                  <button type="button" onClick={() => openAuth('signin')}
+                    className="px-5 py-2.5 rounded-full text-sm font-bold text-white transition-all hover:opacity-90"
+                    style={{ background: C.accentGrad }}>
+                    Sign In
+                  </button>
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -3026,11 +3148,36 @@ export default function App() {
           {tab === 'decks' && (
             <motion.div key="decks" {...fadeUp}>
 
+              {review ? (
+                <ReviewSession theme={C} title={review.title} cards={review.cards}
+                  otherDueAt={review.otherDueAt} onRate={saveReviewRating} onExit={endReview} />
+              ) : (<>
+
               {/* Page heading */}
-              <div className="mb-6">
-                <h2 className="text-3xl font-black mb-1" style={{ color: C.text }}>My Decks</h2>
-                <p className="text-sm" style={{ color: C.textMuted }}>Your saved study materials</p>
+              <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <h2 className="text-3xl font-black mb-1" style={{ color: C.text }}>My Decks</h2>
+                  <p className="text-sm" style={{ color: C.textMuted }}>Your saved study materials</p>
+                </div>
+                {!decksLoading && dueCounts && totalDue > 0 && (
+                  <motion.button whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+                    onClick={() => startReview(null)} disabled={Boolean(startingReview)}
+                    className="px-5 py-3 rounded-full text-sm font-bold text-white disabled:opacity-60"
+                    style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}40` }}>
+                    {startingReview === 'all' ? 'Starting...' : `Review all due (${totalDue})`}
+                  </motion.button>
+                )}
               </div>
+
+              {!decksLoading && dueCounts && savedDecks.length > 0 && (
+                <p className="text-sm mb-5 rounded-2xl px-4 py-3"
+                  style={{ background: C.accentLight, color: C.text, border: `1px solid ${C.accent}25` }}>
+                  <strong>Spaced repetition:</strong>{' '}
+                  {totalDue > 0
+                    ? `${totalDue} card${totalDue === 1 ? ' is' : 's are'} due. Review shows each card just before you'd forget it, so you remember more with less study.`
+                    : "You're all caught up! Cards come back for review right before you're likely to forget them."}
+                </p>
+              )}
 
               {/* Stats row - matches Image 6 */}
               {!decksLoading && (
@@ -3041,7 +3188,7 @@ export default function App() {
                     { label: 'Active Decks', value: savedDecks.length, color: C.accentGrad },
                     { label: 'Total Cards', value: deckStats.totalCards, color: 'linear-gradient(135deg, #38B2AC, #2C7A7B)' },
                     { label: 'Study Streak', value: 'Keep it up!', color: 'linear-gradient(135deg, #C05621, #9C4221)' },
-                  ].map((stat, i) => (
+                  ].map(stat => (
                     <motion.div key={stat.label} variants={cardVariant}
                       className="rounded-2xl p-5"
                       style={{ background: stat.color }}>
@@ -3072,7 +3219,7 @@ export default function App() {
                 <motion.div
                   variants={staggerContainer} initial="initial" animate="animate"
                   className="space-y-3">
-                  {savedDecks.map((deck, idx) => (
+                  {savedDecks.map(deck => (
                     <motion.div key={deck.id} variants={cardVariant}
                       whileHover={{ scale: 1.005, boxShadow: '0 4px 16px rgba(0,0,0,0.06)' }}
                       className="rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4"
@@ -3089,10 +3236,25 @@ export default function App() {
                             Created {new Date(deck.created_at).toLocaleDateString('en-NZ', {
                               day: 'numeric', month: 'short', year: 'numeric'
                             })}
+                            {dueCounts && (
+                              <span className="ml-2 font-semibold" style={{ color: dueCounts[deck.id] ? C.accent : C.textLight }}>
+                                · {dueCounts[deck.id] ? `${dueCounts[deck.id]} due for review` : 'All caught up'}
+                              </span>
+                            )}
                           </p>
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
+                        {dueCounts && dueCounts[deck.id] > 0 && (
+                          <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                            onClick={() => startReview(deck)}
+                            disabled={Boolean(startingReview)}
+                            aria-label={`Review ${dueCounts[deck.id]} due cards in ${deck.title}`}
+                            className="px-4 py-2 rounded-full text-xs font-bold disabled:opacity-60"
+                            style={{ background: C.accentGrad, color: 'white' }}>
+                            {startingReview === deck.id ? 'Starting...' : `Review (${dueCounts[deck.id]})`}
+                          </motion.button>
+                        )}
                         <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                           onClick={() => openDeck(deck, 'flashcards')}
                           disabled={Boolean(openingDeck)}
@@ -3118,11 +3280,14 @@ export default function App() {
                         ))}
                         <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                           onClick={async () => {
-                            await supabase.from('decks').delete().eq('id', deck.id)
+                            if (!window.confirm(`Delete "${deck.title}"? This can't be undone.`)) return
+                            const { error } = await supabase.from('decks').delete().eq('id', deck.id)
+                            if (error) { setToast("Couldn't delete that deck. Please try again."); return }
                             setSavedDecks(prev => prev.filter(d => d.id !== deck.id))
                             setToast('Deck deleted')
                           }}
-                          className="p-2 rounded-full text-sm transition-all hover:opacity-80"
+                          aria-label={`Delete ${deck.title}`}
+                          className="px-3 py-2 rounded-full text-xs font-bold transition-all hover:opacity-80"
                           style={{ background: C.dangerLight, color: C.danger }}>
                           Delete
                         </motion.button>
@@ -3131,6 +3296,7 @@ export default function App() {
                   ))}
                 </motion.div>
               )}
+              </>)}
             </motion.div>
           )}
         </AnimatePresence>

@@ -27,7 +27,38 @@ export default function Authentication({ onLogin, onBack, initialMode = 'signin'
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState({ text: '', type: '' })
 
+  // "Forgot password?": email a reset link. The message is the same whether or
+  // not the email has an account, so nobody can use this to find out who has one.
+  const handleReset = async () => {
+    const address = email.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) {
+      setMessage({ text: 'Enter the email you signed up with.', type: 'error' })
+      return
+    }
+    setLoading(true)
+    setMessage({ text: '', type: '' })
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(address, {
+        redirectTo: window.location.origin,
+      })
+      if (error && (error.status === 429 || error.code === 'over_email_send_rate_limit')) {
+        setMessage({ text: 'Too many requests. Please wait a few minutes and try again.', type: 'error' })
+      } else if (error && !error.status) {
+        setMessage({ text: "Couldn't reach the server. Check your connection and try again.", type: 'error' })
+      } else {
+        setMessage({
+          text: 'If an account exists for that email, a reset link is on its way. Open it on this device to choose a new password.',
+          type: 'success',
+        })
+      }
+    } catch {
+      setMessage({ text: "Couldn't reach the server. Check your connection and try again.", type: 'error' })
+    }
+    setLoading(false)
+  }
+
   const handleAuth = async () => { // Handles both sign in and sign up, makes sure fields are filled.
+    if (mode === 'reset') return handleReset()
     if (!email || !password) {
       setMessage({ text: 'Please fill in all fields.', type: 'error' })
       return
@@ -68,7 +99,7 @@ export default function Authentication({ onLogin, onBack, initialMode = 'signin'
   const switchMode = (newMode) => {
     setMode(newMode)
     setMessage({ text: '', type: '' })
-    setEmail('')
+    if (newMode !== 'reset') setEmail('') // keep the typed email when asking for a reset
     setPassword('')
   }
 
@@ -106,8 +137,17 @@ export default function Authentication({ onLogin, onBack, initialMode = 'signin'
           <p className="text-xs mt-1" style={{ color: C.textMuted }}>Your premium academic workspace</p>
         </div>
 
+        {mode === 'reset' && (
+          <div className="mb-6 text-center">
+            <h2 className="text-lg font-black" style={{ color: C.text }}>Reset your password</h2>
+            <p className="text-sm mt-1" style={{ color: C.textMuted }}>
+              Enter your email and we'll send you a link to choose a new password.
+            </p>
+          </div>
+        )}
+
         {/* Sign In / Sign Up toggle pill — matches Image 7 exactly */}
-        <div className="flex p-1 rounded-full mb-6"
+        {mode !== 'reset' && <div className="flex p-1 rounded-full mb-6"
           style={{ background: C.bg, border: `1px solid ${C.border}` }}>
           {['signin', 'signup'].map(m => (
             <button key={m}
@@ -120,7 +160,7 @@ export default function Authentication({ onLogin, onBack, initialMode = 'signin'
               {m === 'signin' ? 'Sign In' : 'Sign Up'}
             </button>
           ))}
-        </div>
+        </div>}
 
         {/* Form fields */}
         <AnimatePresence mode="wait">
@@ -152,17 +192,18 @@ export default function Authentication({ onLogin, onBack, initialMode = 'signin'
               </div>
 
               {/* Password with show/hide toggle — matches Image 7 */}
-              <div>
+              {mode !== 'reset' && <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block text-xs font-semibold uppercase tracking-widest"
                     style={{ color: C.textMuted }}>
                     Password
                   </label>
                   {mode === 'signin' && (
-                    <span className="text-xs cursor-pointer hover:underline"
+                    <button type="button" onClick={() => switchMode('reset')}
+                      className="text-xs hover:underline"
                       style={{ color: C.accent }}>
                       Forgot password?
-                    </span>
+                    </button>
                   )}
                 </div>
                 <div className="relative">
@@ -190,7 +231,7 @@ export default function Authentication({ onLogin, onBack, initialMode = 'signin'
                    Show
                   </label>
                 </div>
-              </div>
+              </div>}
             </div>
 
             {/* Error / success message */}
@@ -215,18 +256,25 @@ export default function Authentication({ onLogin, onBack, initialMode = 'signin'
             <button onClick={handleAuth} disabled={loading}
               className="w-full py-3 rounded-full font-bold text-white text-sm transition-all hover:opacity-90 hover:scale-105 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 mb-4"
               style={{ background: C.accentGrad, boxShadow: `0 4px 16px ${C.accent}40` }}>
-              {loading ? 'Loading...' : mode === 'signin' ? 'Sign In' : 'Create Account'}
+              {loading ? 'Loading...' : mode === 'reset' ? 'Send reset link' : mode === 'signin' ? 'Sign In' : 'Create Account'}
             </button>
 
             {/* Bottom toggle link — matches "Don't have an account? Create one for free" */}
-            <p className="text-center text-sm" style={{ color: C.textMuted }}>
+            {mode === 'reset' ? (
+              <p className="text-center text-sm" style={{ color: C.textMuted }}>
+                Remembered it?{' '}
+                <button onClick={() => switchMode('signin')} className="font-bold hover:underline" style={{ color: C.accent }}>
+                  Back to sign in
+                </button>
+              </p>
+            ) : <p className="text-center text-sm" style={{ color: C.textMuted }}>
               {mode === 'signin' ? "Don't have an account? " : 'Already have an account? '}
               <button onClick={() => switchMode(mode === 'signin' ? 'signup' : 'signin')}
                 className="font-bold hover:underline"
                 style={{ color: C.accent }}>
                 {mode === 'signin' ? 'Create one for free' : 'Sign in'}
               </button>
-            </p>
+            </p>}
           </motion.div>
         </AnimatePresence>
       </motion.div>
