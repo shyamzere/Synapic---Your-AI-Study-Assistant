@@ -5,6 +5,7 @@ import synapicLogo from './assets/synapicLogo1.png'
 import { supabase } from './supabase'
 import Authentication from './Authentication'
 import { extractPdfText, isPdfFile, PdfReadError } from './pdfText'
+import { joinSpokenText, useSpeechToText } from './useSpeechToText'
 
 // ── Design tokens ────────────────────────────────────────────
 const LIGHT_THEME = {
@@ -1361,6 +1362,55 @@ function ChatSources({ sources }) {
   )
 }
 
+// ── Voice typing ─────────────────────────────────────────────
+function MicIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <line x1="12" y1="18" x2="12" y2="21" />
+    </svg>
+  )
+}
+
+// Mic toggle. Red with a pulsing dot while listening so it's always obvious
+// that the microphone is on.
+function MicButton({ listening, onClick, idleLabel, actionLabel, disabled = false, iconOnly = false }) {
+  return (
+    <motion.button type="button" onClick={onClick} disabled={disabled}
+      whileHover={disabled ? {} : { scale: 1.03 }} whileTap={disabled ? {} : { scale: 0.97 }}
+      aria-pressed={listening}
+      aria-label={listening ? `Stop ${actionLabel}` : `Start ${actionLabel}`}
+      title={listening ? 'Stop listening' : actionLabel}
+      className={`inline-flex items-center justify-center gap-2 rounded-full text-sm font-bold flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${iconOnly ? 'w-11 h-11' : 'px-4 py-2'}`}
+      style={listening
+        ? { background: C.danger, color: 'white', border: `1px solid ${C.danger}` }
+        : { background: C.accentLight, color: C.accentDark, border: `1px solid ${C.accent}30` }}>
+      {listening
+        ? <span className="w-2.5 h-2.5 rounded-full bg-white animate-pulse" aria-hidden="true" />
+        : <MicIcon />}
+      {!iconOnly && (listening ? 'Stop' : idleLabel)}
+    </motion.button>
+  )
+}
+
+// Live preview + a plain-language note on where speech is processed.
+function ListeningHint({ interim }) {
+  return (
+    <div className="rounded-xl px-3 py-2 text-xs leading-relaxed"
+      style={{ background: C.dangerLight, color: C.text, border: `1px solid ${C.danger}30` }}
+      aria-live="polite">
+      <span className="font-bold" style={{ color: C.danger }}>Listening… </span>
+      {interim ? <em>{interim}</em> : 'speak now. Press Stop when you are done.'}
+      <p className="mt-1" style={{ color: C.textMuted }}>
+        Your browser turns speech into text (Chrome and Edge use their online speech service).
+        Synapic never receives your audio.
+      </p>
+    </div>
+  )
+}
+
 // Shown on flashcards / quiz / summary results: jumps to the Chat tab, which
 // already uses the same notes, so students can ask follow-up questions.
 function ChatWithNotesButton({ onClick, className = '' }) {
@@ -1375,9 +1425,13 @@ function ChatWithNotesButton({ onClick, className = '' }) {
   )
 }
 
-function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
+function ChatPanel({ messages, loading, hasNotes, onSend, onClear, onMicError }) {
   const [draft, setDraft] = useState('')
   const listRef = useRef(null)
+  const mic = useSpeechToText({
+    onFinalText: (spoken) => setDraft(prev => joinSpokenText(prev, spoken).slice(0, CHAT_QUESTION_MAX)),
+    onError: onMicError,
+  })
 
   // Keep the newest message in view.
   useEffect(() => {
@@ -1388,6 +1442,7 @@ function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
   const send = async (text) => {
     const question = text.trim()
     if (!question || loading || !hasNotes) return
+    if (mic.listening) mic.stop() // don't keep adding words after sending
     setDraft('')
     const ok = await onSend(question)
     // If it failed, put the question back so the student doesn't have to retype it.
@@ -1504,6 +1559,11 @@ function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
             className="flex-1 min-w-0 rounded-2xl px-4 py-3 text-base sm:text-sm resize-none focus:outline-none transition-all disabled:opacity-50"
             style={{ background: C.bg, border: `1.5px solid ${C.border}`, color: C.text }}
           />
+          {mic.supported && (
+            <MicButton iconOnly listening={mic.listening} disabled={!hasNotes}
+              onClick={mic.listening ? mic.stop : mic.start}
+              actionLabel="voice typing for your question" />
+          )}
           <motion.button
             type="button"
             whileHover={{ scale: 1.03 }}
@@ -1515,6 +1575,7 @@ function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
             {loading ? 'Thinking...' : 'Send'}
           </motion.button>
         </div>
+        {mic.listening && <div className="mt-2"><ListeningHint interim={mic.interim} /></div>}
         <p className="text-xs mt-2" style={{ color: draft.length > CHAT_QUESTION_MAX - 100 ? C.warning : C.textLight }}>
           Enter to send · Shift+Enter for a new line
           {draft.length > CHAT_QUESTION_MAX - 100 && ` · ${draft.length}/${CHAT_QUESTION_MAX}`}
@@ -1792,6 +1853,25 @@ export default function App() {
     }
     handlePdfFile(file)
   }
+
+  // ── Voice typing for notes ────────────────────────────────
+  const notesMic = useSpeechToText({
+    onFinalText: (spoken) => {
+      if (notes.length + spoken.length + 1 > currentInputLimit) {
+        setToast(`You've reached the ${currentInputLimit.toLocaleString()} character limit, so voice typing stopped.`)
+        stopNotesMic()
+      }
+      setNotes(prev => joinSpokenText(prev, spoken).slice(0, currentInputLimit))
+      resetChat() // the notes changed, so old chat answers no longer apply
+    },
+    onError: setToast,
+  })
+  const stopNotesMic = notesMic.stop
+
+  // Never leave the microphone on while the notes box isn't on screen.
+  useEffect(() => {
+    if (page !== 'app' || tab === 'decks' || tab === 'settings') stopNotesMic()
+  }, [page, tab, stopNotesMic])
 
   // Returns true if the question was answered, false if it failed.
   const sendChatMessage = async (question) => {
@@ -2152,6 +2232,12 @@ export default function App() {
                     <><span aria-hidden="true">📄</span> Upload PDF</>
                   )}
                 </motion.button>
+                {notesMic.supported && (
+                  <MicButton listening={notesMic.listening}
+                    onClick={notesMic.listening ? notesMic.stop : notesMic.start}
+                    disabled={loading || Boolean(pdfProgress)}
+                    idleLabel="Speak notes" actionLabel="voice typing for your notes" />
+                )}
                 {notesSource ? (
                   <span className="text-xs" style={{ color: C.textMuted }}>
                     From <strong style={{ color: C.text }}>{notesSource.name}</strong>
@@ -2165,6 +2251,10 @@ export default function App() {
                   </span>
                 )}
               </div>
+
+              {notesMic.listening && (
+                <div className="mb-3"><ListeningHint interim={notesMic.interim} /></div>
+              )}
 
               {/* Textarea (also a drop zone for PDFs) */}
               <div className="relative"
@@ -2864,6 +2954,7 @@ export default function App() {
                 hasNotes={notes.trim().length > 0}
                 onSend={sendChatMessage}
                 onClear={resetChat}
+                onMicError={setToast}
               />
             </motion.div>
           )}

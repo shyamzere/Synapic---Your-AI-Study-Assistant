@@ -41,7 +41,7 @@ export const isPdfFile = (file) =>
 
 // Turn one page's raw text into readable lines.
 const tidyPageText = (text) => text
-  .replace(/[ \t ]+/g, ' ')        // collapse runs of spaces
+  .replace(/[ \t\u00A0]+/g, ' ')        // collapse runs of spaces
   .replace(/(\w)-\n(\w)/g, '$1$2')       // re-join words hyphenated across lines
   .replace(/ *\n */g, '\n')
   .replace(/\n{3,}/g, '\n\n')
