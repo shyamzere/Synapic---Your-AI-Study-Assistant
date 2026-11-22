@@ -1359,6 +1359,20 @@ function ChatSources({ sources }) {
   )
 }
 
+// Shown on flashcards / quiz / summary results: jumps to the Chat tab, which
+// already uses the same notes, so students can ask follow-up questions.
+function ChatWithNotesButton({ onClick, className = '' }) {
+  return (
+    <motion.button type="button" onClick={onClick}
+      whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+      className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full text-sm font-bold transition-colors ${className}`}
+      style={{ background: C.bgCard, color: C.accent, border: `1.5px solid ${C.accent}` }}>
+      <span aria-hidden="true">💬</span>
+      Chat with my notes
+    </motion.button>
+  )
+}
+
 function ChatPanel({ messages, loading, hasNotes, onSend, onClear }) {
   const [draft, setDraft] = useState('')
   const listRef = useRef(null)
@@ -1823,6 +1837,11 @@ export default function App() {
     if (tab === 'decks') loadDecks()
   }, [tab, loadDecks])
 
+  const openChat = () => {
+    setTab('chat')
+    window.scrollTo({ top: 0, behavior: shouldReduceMotion ? 'auto' : 'smooth' })
+  }
+
   const openAuth = (mode = 'signin') => {
     setAuthMode(mode)
     setPage('auth')
@@ -2193,6 +2212,7 @@ export default function App() {
                           </motion.button>
                         </div>
                       )}
+                      <ChatWithNotesButton onClick={openChat} />
                     </div>
 
                     {/* Grid / Study mode toggle - matches Image 3 toggle */}
@@ -2438,10 +2458,13 @@ export default function App() {
               {!loading && quiz && (
                 <div className="space-y-5">
                   {/* Score badge - top right like Image 4 */}
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold" style={{ color: C.textMuted }}>
-                      {quiz.length} questions
-                    </p>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <p className="text-sm font-semibold" style={{ color: C.textMuted }}>
+                        {quiz.length} questions
+                      </p>
+                      <ChatWithNotesButton onClick={openChat} />
+                    </div>
                     {quizSubmitted && (
                       <motion.div
                         initial={{ scale: 0.8, opacity: 0 }}
@@ -2648,14 +2671,17 @@ export default function App() {
                     </motion.div>
                   </div>
 
-                  {/* Ready to Quiz CTA - matches Image 5 bottom button */}
-                  <motion.button variants={cardVariant}
-                    whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.99 }}
-                    onClick={() => setTab('quizzes')}
-                    className="w-full py-4 rounded-2xl font-bold text-white text-base"
-                    style={{ background: C.accentGrad, boxShadow: `0 4px 20px ${C.accent}30` }}>
-                    Ready to Quiz?
-                  </motion.button>
+                  {/* Next steps: quiz yourself or chat about the notes */}
+                  <motion.div variants={cardVariant} className="flex flex-col sm:flex-row gap-3">
+                    <motion.button
+                      whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.99 }}
+                      onClick={() => setTab('quizzes')}
+                      className="flex-1 py-4 rounded-2xl font-bold text-white text-base"
+                      style={{ background: C.accentGrad, boxShadow: `0 4px 20px ${C.accent}30` }}>
+                      Ready to Quiz?
+                    </motion.button>
+                    <ChatWithNotesButton onClick={openChat} className="sm:w-auto py-4 px-8 rounded-2xl text-base" />
+                  </motion.div>
                 </motion.div>
               )}
             </motion.div>
