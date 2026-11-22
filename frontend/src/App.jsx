@@ -1413,6 +1413,13 @@ function ListeningHint({ interim }) {
 
 // Shown on flashcards / quiz / summary results: jumps to the Chat tab, which
 // already uses the same notes, so students can ask follow-up questions.
+// Turns a deck's cards back into study notes (for decks saved before their
+// notes were stored), so quizzes, summaries and chat still have material.
+const cardsToNotes = (cards) => cards
+  .filter(card => card?.question || card?.answer)
+  .map(card => `${(card.question || '').trim()}\n${(card.answer || '').trim()}`.trim())
+  .join('\n\n')
+
 function ChatWithNotesButton({ onClick, className = '' }) {
   return (
     <motion.button type="button" onClick={onClick}
@@ -1620,7 +1627,9 @@ export default function App() {
   const chatMessageIdRef = useRef(0) // unique React keys for messages
   // PDF upload
   const [pdfProgress, setPdfProgress] = useState(null) // { done, total } while reading
-  const [notesSource, setNotesSource] = useState(null) // { name, pagesRead, pageCount, truncated }
+  const [notesSource, setNotesSource] = useState(null) // PDF: { name, pagesRead, pageCount, truncated }; deck: { kind: 'deck', name, fromCards }
+  const [openingDeck, setOpeningDeck] = useState(null) // id of the deck being loaded
+  const flashcardNotesRef = useRef('') // the notes the current flashcards came from
   const [dragActive, setDragActive] = useState(false)
   const fileInputRef = useRef(null)
 
@@ -1763,6 +1772,7 @@ export default function App() {
       if (tab === 'flashcards') {
         const res = await axios.post(`${import.meta.env.VITE_API_URL}/generate-flashcards`, { text: notes }, requestConfig)
         setFlashcards(res.data.flashcards)
+        flashcardNotesRef.current = notes // saved with the deck, even if the box is edited later
         setDeckName(makeDefaultDeckTitle(notes))
         setToast(`Generated ${res.data.flashcards.length} flashcards`)
       } else if (tab === 'quizzes') {
@@ -1929,8 +1939,14 @@ export default function App() {
     try {
       const customTitle = deckName.trim()
       const title = customTitle || makeDefaultDeckTitle(notes)
-      const { data: deck, error: deckError } = await supabase
-        .from('decks').insert({ user_id: user.id, title }).select().single()
+      const deckNotes = (flashcardNotesRef.current || notes).slice(0, MAX_INPUT_CHARS)
+      const insertDeck = (row) => supabase.from('decks').insert(row).select().single()
+      let { data: deck, error: deckError } = await insertDeck({ user_id: user.id, title, notes: deckNotes })
+      if (deckError && (deckError.code === 'PGRST204' || deckError.code === '42703')) {
+        // The database doesn't have the `notes` column yet: save the deck
+        // without it (its notes are rebuilt from the cards when opened).
+        ({ data: deck, error: deckError } = await insertDeck({ user_id: user.id, title }))
+      }
       if (deckError) throw deckError
       const cardRows = flashcards.map(card => ({
         deck_id: deck.id, question: card.question, answer: card.answer
@@ -1974,6 +1990,46 @@ export default function App() {
   const openChat = () => {
     setTab('chat')
     window.scrollTo({ top: 0, behavior: shouldReduceMotion ? 'auto' : 'smooth' })
+  }
+
+  // ── Open a saved deck ─────────────────────────────────────
+  // Loads the deck's cards AND its notes, so the deck can be studied, quizzed,
+  // summarised or chatted with. Decks saved before notes were stored get
+  // notes rebuilt from their questions and answers.
+  const openDeck = async (deck, target) => {
+    if (openingDeck) return
+    setOpeningDeck(deck.id)
+    try {
+      const { data: cards, error } = await supabase
+        .from('flashcards').select('question, answer').eq('deck_id', deck.id)
+      if (error) throw error
+      const savedNotes = typeof deck.notes === 'string' ? deck.notes.trim() : ''
+      const deckNotes = (savedNotes || cardsToNotes(cards || [])).slice(0, currentInputLimit)
+      if (!deckNotes) {
+        setToast('This deck is empty, so there is nothing to study.')
+        return
+      }
+      handleNotesChange(deckNotes)
+      setNotesSource({ kind: 'deck', name: deck.title, fromCards: !savedNotes })
+      flashcardNotesRef.current = deckNotes
+      setFlashcards(cards || [])
+      setFlipped({})
+      setCurrentCard(0)
+      setStudyMode('grid')
+      // Results from other notes would be confusing next to this deck.
+      setQuiz(null)
+      setQuizAnswers({})
+      setQuizSubmitted(false)
+      setSummary(null)
+      if (target === 'flashcards') recordStudySession()
+      setTab(target)
+      window.scrollTo({ top: 0, behavior: shouldReduceMotion ? 'auto' : 'smooth' })
+      setToast(`Loaded "${deck.title}"`)
+    } catch {
+      setToast("Couldn't open that deck. Please try again.")
+    } finally {
+      setOpeningDeck(null)
+    }
   }
 
   const openAuth = (mode = 'signin') => {
@@ -2238,7 +2294,12 @@ export default function App() {
                     disabled={loading || Boolean(pdfProgress)}
                     idleLabel="Speak notes" actionLabel="voice typing for your notes" />
                 )}
-                {notesSource ? (
+                {notesSource?.kind === 'deck' ? (
+                  <span className="text-xs" style={{ color: C.textMuted }}>
+                    From your deck <strong style={{ color: C.text }}>{notesSource.name}</strong>
+                    {notesSource.fromCards && ' · notes rebuilt from its cards'}
+                  </span>
+                ) : notesSource ? (
                   <span className="text-xs" style={{ color: C.textMuted }}>
                     From <strong style={{ color: C.text }}>{notesSource.name}</strong>
                     {' '}· {notesSource.truncated
@@ -3014,7 +3075,7 @@ export default function App() {
                   {savedDecks.map((deck, idx) => (
                     <motion.div key={deck.id} variants={cardVariant}
                       whileHover={{ scale: 1.005, boxShadow: '0 4px 16px rgba(0,0,0,0.06)' }}
-                      className="rounded-2xl p-5 flex items-center justify-between"
+                      className="rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4"
                       style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
                       <div className="flex items-center gap-4">
                         {/* Colored icon - matches Image 6 subject icons */}
@@ -3031,23 +3092,30 @@ export default function App() {
                           </p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-                          onClick={async () => {
-                            const { data } = await supabase
-                              .from('flashcards').select('*').eq('deck_id', deck.id)
-                            setFlashcards(data)
-                            setFlipped({})
-                            setCurrentCard(0)
-                            setStudyMode('grid')
-                            recordStudySession()
-                            setTab('flashcards')
-                            setToast(`Loaded "${deck.title}"`)
-                          }}
-                          className="flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold"
+                          onClick={() => openDeck(deck, 'flashcards')}
+                          disabled={Boolean(openingDeck)}
+                          aria-label={`Study ${deck.title}`}
+                          className="flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold disabled:opacity-60"
                           style={{ background: C.accentGrad, color: 'white' }}>
-                          Study
+                          {openingDeck === deck.id ? 'Opening...' : 'Study'}
                         </motion.button>
+                        {[
+                          { target: 'quizzes', label: 'Quiz', verb: 'Quiz me on' },
+                          { target: 'summary', label: 'Summary', verb: 'Summarise' },
+                          { target: 'chat', label: 'Chat', verb: 'Chat with' },
+                        ].map(action => (
+                          <motion.button key={action.target}
+                            whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                            onClick={() => openDeck(deck, action.target)}
+                            disabled={Boolean(openingDeck)}
+                            aria-label={`${action.verb} ${deck.title}`}
+                            className="px-4 py-2 rounded-full text-xs font-bold disabled:opacity-60"
+                            style={{ background: C.accentLight, color: C.accent, border: `1px solid ${C.accent}30` }}>
+                            {action.label}
+                          </motion.button>
+                        ))}
                         <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                           onClick={async () => {
                             await supabase.from('decks').delete().eq('id', deck.id)
